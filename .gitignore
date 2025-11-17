@@ -1,0 +1,22 @@
+# Root node modules
+node_modules/
+
+# Frontend node modules (just in case)
+frontend/node_modules/
+
+# Frontend build artifacts
+frontend/.next/
+frontend/dist/
+frontend/build/
+
+# Backend / root build artifacts
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+.env.*
