@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agent, documents, graph, missions, settings
+from app.api import agent, documents, graph, missions, report, settings
 from app.db.init_db import init_db
 
 
@@ -31,4 +31,5 @@ app.include_router(missions.router)
 app.include_router(documents.router)
 app.include_router(graph.router)
 app.include_router(agent.router)
+app.include_router(report.router)
 app.include_router(settings.router)

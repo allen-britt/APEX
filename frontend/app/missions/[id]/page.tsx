@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import MissionDetail from "@/components/MissionDetail";
 import DocumentForm from "@/components/DocumentForm";
 import DocumentList from "@/components/DocumentList";
@@ -45,7 +47,15 @@ export default async function MissionPage({ params }: MissionPageProps) {
         <section className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-xl font-semibold">Documents</h3>
-            <span className="text-sm text-slate-400">{documents.length} files</span>
+            <div className="flex items-center gap-3 text-sm text-slate-400">
+              <span>{documents.length} files</span>
+              <Link
+                href={`/missions/${missionId}/report`}
+                className="rounded border border-slate-600 px-3 py-1 text-xs font-semibold text-slate-100 transition hover:bg-slate-800"
+              >
+                View report
+              </Link>
+            </div>
           </div>
           <div className="grid gap-6 lg:grid-cols-2">
             <DocumentList missionId={missionId} documents={documents} />

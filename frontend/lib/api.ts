@@ -85,6 +85,24 @@ export interface ModelInfo {
   source?: string;
 }
 
+export interface GuardrailReport {
+  overall_score: string;
+  issues: string[];
+}
+
+export interface MissionReport {
+  mission: Mission;
+  documents: Document[];
+  run: AgentRun | null;
+  entities: Entity[];
+  events: Event[];
+  guardrail?: GuardrailReport | null;
+  gaps?: string[] | null;
+  next_steps?: string[] | null;
+  delta_summary?: string | null;
+  generated_at: string;
+}
+
 export interface AvailableModelsResponse {
   models: ModelInfo[];
 }
@@ -190,6 +208,18 @@ export async function deleteEvent(eventId: number): Promise<void> {
 
 export async function clearMissionEvents(missionId: number): Promise<void> {
   await request({ path: `/missions/${missionId}/events`, method: "DELETE" });
+}
+
+export async function getMissionReport(missionId: number, runId?: number): Promise<MissionReport> {
+  const search = new URLSearchParams();
+  if (runId) {
+    search.set("run_id", String(runId));
+  }
+  const query = search.toString();
+  const path = query
+    ? `/missions/${missionId}/report?${search.toString()}`
+    : `/missions/${missionId}/report`;
+  return request({ path });
 }
 
 export async function fetchMissionGraph(missionId: number): Promise<{
