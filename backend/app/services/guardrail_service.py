@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence
 
 from app.services import llm_client
+from app.services.policy_context import guardrail_keyword_hits
 
 BANNED_WORDS = ["kill", "classified", "US PERSON", "lethal"]
 ISO_TIMESTAMP_PATTERN = re.compile(
@@ -42,7 +43,14 @@ def _find_future_timestamps(text: str) -> List[str]:
     return future_markers
 
 
-def run_guardrails(summary: str, next_steps: str) -> Dict[str, List[str]]:
+def run_guardrails(
+    summary: str,
+    next_steps: str,
+    *,
+    authority: str | None = None,
+    authority_history: Sequence[str] | None = None,
+    authority_metadata: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """Evaluate generated content for safety and policy adherence."""
 
     issues: List[str] = []
@@ -75,10 +83,25 @@ def run_guardrails(summary: str, next_steps: str) -> Dict[str, List[str]]:
         issues.append("Mentions a source despite no mission documents being available.")
         status = "blocked"
 
+    policy_hits = guardrail_keyword_hits(authority, f"{summary_text}\n{next_steps_text}") if authority else []
+    if policy_hits:
+        issues.extend(policy_hits)
+        status = "blocked"
+
     if issues and status != "blocked":
         status = "warning"
 
-    return {"status": status, "issues": issues}
+    metadata = authority_metadata or {}
+    result: Dict[str, Any] = {
+        "status": status,
+        "issues": issues,
+        "original_authority": metadata.get("original_authority"),
+        "current_authority": metadata.get("current_authority", authority),
+        "has_pivots": metadata.get("has_pivots", bool(authority_history)),
+    }
+    if authority_history:
+        result["authority_history"] = list(authority_history)
+    return result
 
 
 STATUS_LEVELS = {"OK": 0, "CAUTION": 1, "REVIEW": 2}
@@ -109,7 +132,11 @@ async def evaluate_guardrails(
     gaps: Dict | List | None,
     cross: Dict,
     profile: str = "humint",
-) -> Tuple[str, List[str]]:
+    authority: str | None = None,
+    policy_block: str | None = None,
+    authority_history: Sequence[str] | None = None,
+    authority_metadata: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """Score analytic quality using heuristics plus LLM validation."""
 
     issues: List[str] = []
@@ -156,6 +183,7 @@ async def evaluate_guardrails(
             gaps=gaps or {"gaps": gap_entries},
             cross=cross or {},
             profile=profile,
+            policy_block=policy_block,
         )
     except Exception:
         review = {"status": "REVIEW", "issues": ["Guardrail LLM review failed; manual inspection required."]}
@@ -167,5 +195,19 @@ async def evaluate_guardrails(
         issues.extend(review_issues)
     score = max(score, review_score)
 
+    policy_hits = guardrail_keyword_hits(authority, summary) if authority else []
+    policy_hits += guardrail_keyword_hits(authority, estimate) if authority else []
+    if policy_hits:
+        issues.extend(policy_hits)
+        score = max(score, STATUS_LEVELS["REVIEW"])
+
     final_status = next((name for name, level in STATUS_LEVELS.items() if level == score), "REVIEW")
-    return final_status, issues
+    metadata = authority_metadata or {}
+    return {
+        "status": final_status,
+        "issues": issues,
+        "original_authority": metadata.get("original_authority"),
+        "current_authority": metadata.get("current_authority", authority),
+        "has_pivots": metadata.get("has_pivots", bool(authority_history)),
+        "authority_history": list(authority_history or []),
+    }

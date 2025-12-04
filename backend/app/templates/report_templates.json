@@ -1,0 +1,274 @@
+[
+  {
+    "id": "osint_pol_multi_v1",
+    "name": "OSINT – Pattern of Life (Multi-Mission)",
+    "discipline": "OSINT",
+    "scope": "multi_mission",
+    "version": 1,
+    "description": "Cross-mission OSINT-based pattern of life for one or more focal entities.",
+    "int_type": "OSINT",
+    "mission_domains": ["LEO", "IC", "Civilian"],
+    "title10_allowed": false,
+    "title50_allowed": true,
+    "inputs": {
+      "required": ["missions", "entities"],
+      "optional": ["time_window", "regions"],
+      "data_requirements": [
+        "documents.osint",
+        "graph.entities",
+        "graph.events",
+        "gap_analysis"
+      ]
+    },
+    "sections": [
+      {
+        "id": "collection_summary",
+        "title": "Collection Summary",
+        "purpose": "Summarize OSINT coverage by mission and entity.",
+        "prompt_role": "system",
+        "prompt": "Summarize OSINT collection volume and mission coverage, highlighting how many relevant reports exist per mission and any major gaps."
+      },
+      {
+        "id": "identity_overview",
+        "title": "Identity Overview",
+        "purpose": "Describe focal entity identity, aliases, affiliations.",
+        "prompt_role": "analysis",
+        "prompt": "Describe the focal entity's identity, aliases, affiliations, and online presence using OSINT documents and the entity graph. Call out any unresolved questions."
+      },
+      {
+        "id": "pattern_of_life",
+        "title": "Pattern of Life",
+        "purpose": "Explain routines, key locations, temporal patterns.",
+        "prompt_role": "analysis",
+        "prompt": "Describe routines, recurring locations, temporal patterns, and notable behavioral triggers across missions. Highlight consistencies and deviations."
+      },
+      {
+        "id": "online_infrastructure",
+        "title": "Online Infrastructure",
+        "purpose": "Summarize digital assets and handles.",
+        "prompt_role": "analysis",
+        "prompt": "List known websites, platforms, handles, or infrastructure linked to the focal entities, including how they interrelate."
+      },
+      {
+        "id": "gaps",
+        "title": "Gaps and Collection Needs",
+        "purpose": "Highlight weak coverage and unknowns.",
+        "prompt_role": "analysis",
+        "prompt": "Using gap-analysis JSON and OSINT sources, highlight missing coverage, weak sources, and high-value unknowns requiring collection."
+      },
+      {
+        "id": "recommended_actions",
+        "title": "Recommended Actions",
+        "purpose": "Recommend OSINT-focused next steps.",
+        "prompt_role": "analysis",
+        "prompt": "Recommend OSINT next steps (collection, alerts, deconfliction) grounded in the evidence above."
+      }
+    ],
+    "output_format": "markdown",
+    "tags": ["osint", "pattern_of_life", "multi_mission"]
+  },
+  {
+    "id": "geoint_area_overview_v1",
+    "name": "GEOINT – Area Overview",
+    "discipline": "GEOINT",
+    "scope": "multi_mission",
+    "version": 1,
+    "description": "Summarizes terrain, infrastructure, and activity patterns within an Area of Interest.",
+    "int_type": "GEOINT",
+    "mission_domains": ["LEO", "DoD"],
+    "title10_allowed": true,
+    "title50_allowed": true,
+    "inputs": {
+      "required": ["missions", "regions"],
+      "optional": ["time_window"],
+      "data_requirements": [
+        "datasets.semantic_profile",
+        "graph.events",
+        "geospatial_layers"
+      ]
+    },
+    "sections": [
+      {
+        "id": "aoi_description",
+        "title": "Area of Interest Description",
+        "purpose": "Describe terrain, infrastructure, LOCs.",
+        "prompt_role": "analysis",
+        "prompt": "Describe the AOI: terrain, infrastructure, key terrain, and lines of communication using mission context and datasets."
+      },
+      {
+        "id": "activity_overview",
+        "title": "Activity Overview",
+        "purpose": "Summarize observed activity patterns.",
+        "prompt_role": "analysis",
+        "prompt": "Summarize observed activity patterns across missions in this AOI, noting trends or surges."
+      },
+      {
+        "id": "critical_infrastructure",
+        "title": "Critical Infrastructure",
+        "purpose": "Highlight critical nodes.",
+        "prompt_role": "analysis",
+        "prompt": "Identify and describe critical infrastructure nodes (bridges, comms, facilities) present in the AOI and their relevance."
+      },
+      {
+        "id": "movement_patterns",
+        "title": "Movement Patterns",
+        "purpose": "Explain movement routes and choke points.",
+        "prompt_role": "analysis",
+        "prompt": "Describe known movement routes, choke points, and typical flows derived from events and datasets."
+      },
+      {
+        "id": "geospatial_gaps",
+        "title": "Geospatial Gaps",
+        "purpose": "Identify blind spots.",
+        "prompt_role": "analysis",
+        "prompt": "Use coverage and gap data to identify blind spots in GEOINT collection or spatial understanding."
+      },
+      {
+        "id": "geoint_recommendations",
+        "title": "GEOINT Recommendations",
+        "purpose": "Recommend GEOINT tasks.",
+        "prompt_role": "analysis",
+        "prompt": "Recommend GEOINT-focused next steps (imagery tasking, patrol routes, sensor placement)."
+      }
+    ],
+    "output_format": "markdown",
+    "tags": ["geoint", "aoi", "mapping"]
+  },
+  {
+    "id": "sigint_traffic_characterization_v1",
+    "name": "SIGINT – Traffic Characterization",
+    "discipline": "SIGINT",
+    "scope": "single_mission",
+    "version": 1,
+    "description": "Characterizes signal behavior and anomalies for a given mission.",
+    "int_type": "SIGINT",
+    "mission_domains": ["DoD", "IC"],
+    "title10_allowed": true,
+    "title50_allowed": true,
+    "inputs": {
+      "required": ["mission"],
+      "optional": ["time_window", "frequency_ranges"],
+      "data_requirements": [
+        "datasets.semantic_profile",
+        "graph.events",
+        "gap_analysis"
+      ]
+    },
+    "sections": [
+      {
+        "id": "signal_environment",
+        "title": "Signal Environment Overview",
+        "purpose": "Describe RF environment and emitters.",
+        "prompt_role": "analysis",
+        "prompt": "Summarize the RF environment (bands, densities, typical emitters) observed in this mission."
+      },
+      {
+        "id": "traffic_patterns",
+        "title": "Traffic Patterns",
+        "purpose": "Describe recurring signal patterns.",
+        "prompt_role": "analysis",
+        "prompt": "Describe recurring signal patterns, bursts, and diurnal trends, calling out notable correlations."
+      },
+      {
+        "id": "anomalies",
+        "title": "Anomalies & Outliers",
+        "purpose": "Highlight unusual signals.",
+        "prompt_role": "analysis",
+        "prompt": "Highlight unusual signals, timing anomalies, or protocol deviations that merit attention."
+      },
+      {
+        "id": "vulnerabilities",
+        "title": "Potential Vulnerabilities",
+        "purpose": "Identify weaknesses.",
+        "prompt_role": "analysis",
+        "prompt": "Using semantic profiles and any known CVE/ATT&CK mappings, identify exploitable weaknesses or critical dependencies (without suggesting illegal action)."
+      },
+      {
+        "id": "sigint_gaps",
+        "title": "SIGINT Gaps",
+        "purpose": "Identify coverage gaps.",
+        "prompt_role": "analysis",
+        "prompt": "Identify gaps in frequency, time, or emitter coverage using datasets and the gap analysis JSON."
+      },
+      {
+        "id": "recommended_actions",
+        "title": "Recommended SIGINT Actions",
+        "purpose": "Suggest SIGINT next steps.",
+        "prompt_role": "analysis",
+        "prompt": "Suggest SIGINT-focused next steps (taskings, sensor placements, protocol-focused analysis)."
+      }
+    ],
+    "output_format": "markdown",
+    "tags": ["sigint", "rf", "traffic"]
+  },
+  {
+    "id": "humint_debrief_crosscheck_v1",
+    "name": "HUMINT – Debrief & Cross-Corroboration",
+    "discipline": "HUMINT",
+    "scope": "single_mission",
+    "version": 1,
+    "description": "Summarizes HUMINT reporting, cross-checks other disciplines, and flags gaps.",
+    "int_type": "HUMINT",
+    "mission_domains": ["LEO", "IC"],
+    "title10_allowed": false,
+    "title50_allowed": true,
+    "inputs": {
+      "required": ["mission"],
+      "optional": ["entities"],
+      "data_requirements": [
+        "documents.humint",
+        "documents.osint",
+        "datasets.semantic_profile",
+        "graph.entities",
+        "graph.events",
+        "gap_analysis"
+      ]
+    },
+    "sections": [
+      {
+        "id": "source_summary",
+        "title": "Source Summary",
+        "purpose": "Summarize HUMINT sources (non-PII).",
+        "prompt_role": "analysis",
+        "prompt": "Summarize HUMINT sources without PII: number of sources, general access, reporting history, and overall tone."
+      },
+      {
+        "id": "key_reports",
+        "title": "Key Reporting",
+        "purpose": "Summarize major HUMINT reporting.",
+        "prompt_role": "analysis",
+        "prompt": "Summarize the most significant HUMINT reports and their main claims, noting timing and context."
+      },
+      {
+        "id": "cross_corroboration",
+        "title": "Cross-Corroboration",
+        "purpose": "Compare HUMINT claims with other intel.",
+        "prompt_role": "analysis",
+        "prompt": "Compare HUMINT claims to OSINT/SIGINT/GEOINT and indicate where claims are corroborated, partially corroborated, or contradicted."
+      },
+      {
+        "id": "credibility_assessment",
+        "title": "Credibility Assessment",
+        "purpose": "Assess credibility and caveats.",
+        "prompt_role": "analysis",
+        "prompt": "Provide a structured assessment of source/report credibility and consistency, including caveats or confidence statements."
+      },
+      {
+        "id": "humint_gaps",
+        "title": "HUMINT Gaps & Needs",
+        "purpose": "Identify unanswered questions.",
+        "prompt_role": "analysis",
+        "prompt": "Identify HUMINT questions that remain unanswered and where more access is needed."
+      },
+      {
+        "id": "recommended_actions",
+        "title": "Recommended HUMINT Actions",
+        "purpose": "Propose HUMINT next steps.",
+        "prompt_role": "analysis",
+        "prompt": "Propose HUMINT requirements, debrief lines, or coordination points to pursue next."
+      }
+    ],
+    "output_format": "markdown",
+    "tags": ["humint", "cross_corroboration"]
+  }
+]

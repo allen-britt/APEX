@@ -1,8 +1,9 @@
-import MissionForm from "@/components/MissionForm";
-import MissionList from "@/components/MissionList";
+import MissionBoard from "@/components/MissionBoard";
 import { fetchMissions } from "@/lib/api";
 
 import type { Mission } from "@/lib/api";
+
+export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   let missions: Mission[] = [];
@@ -24,14 +25,12 @@ export default async function HomePage() {
         </p>
       </div>
 
-      <MissionForm />
-
       {error ? (
         <div className="card border border-rose-800 bg-rose-950/40 text-sm text-rose-200">
           {error}
         </div>
       ) : (
-        <MissionList missions={missions} />
+        <MissionBoard initialMissions={missions} />
       )}
     </section>
   );

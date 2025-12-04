@@ -1,22 +1,14 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-
 import { RunAnalysisButton } from "@/components/RunAnalysisButton";
+import { useMission } from "@/context/MissionContext";
 
 interface RunAnalysisButtonWrapperProps {
   missionId: number;
 }
 
 export default function RunAnalysisButtonWrapper({ missionId }: RunAnalysisButtonWrapperProps) {
-  const router = useRouter();
+  const { setLatestRun } = useMission();
 
-  return (
-    <RunAnalysisButton
-      missionId={missionId}
-      onCompleted={() => {
-        router.refresh();
-      }}
-    />
-  );
+  return <RunAnalysisButton missionId={missionId} onCompleted={setLatestRun} />;
 }

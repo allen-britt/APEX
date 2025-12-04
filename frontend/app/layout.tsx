@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Project APEX",
-  description: "Mission intelligence console",
+  description: "Mission Intelligence Console",
 };
 
 export default function RootLayout({

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Commander Decision Sheet</title>
+    <style>
+      :root {
+        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        color: #0f172a;
+      }
+      body {
+        margin: 0;
+        padding: 32px;
+        background: #fff;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 8px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+      .header {
+        border-bottom: 2px solid #cbd5f5;
+        padding-bottom: 12px;
+        margin-bottom: 20px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 8px 18px;
+      }
+      .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #475569;
+      }
+      .value {
+        font-size: 14px;
+        color: #0f172a;
+      }
+      .section {
+        margin-bottom: 24px;
+      }
+      .card {
+        border: 1px solid #cbd5f5;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin-bottom: 12px;
+        background: #f8fafc;
+      }
+      .card h3 {
+        margin-bottom: 4px;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid #cbd5f5;
+        color: #0f172a;
+        margin-left: 6px;
+      }
+      ul {
+        padding-left: 18px;
+        margin: 6px 0;
+      }
+      .muted {
+        color: #64748b;
+        font-size: 13px;
+      }
+      .two-col {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 16px;
+      }
+      .policy,
+      .blind-spot {
+        border-left: 3px solid #94a3b8;
+        padding-left: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="header">
+      <div class="grid">
+        <div>
+          <div class="label">Mission</div>
+          <div class="value">{{ mission.title or "Mission" }} (ID {{ mission.id }})</div>
+        </div>
+        <div>
+          <div class="label">Run ID</div>
+          <div class="value">{{ run_id or "N/A" }}</div>
+        </div>
+        <div>
+          <div class="label">Classification</div>
+          <div class="value">{{ mission.classification or "Pending" }}</div>
+        </div>
+        <div>
+          <div class="label">Area of Interest</div>
+          <div class="value">{{ mission.area_of_operations or "Not specified" }}</div>
+        </div>
+      </div>
+    </header>
+
+    <section class="section">
+      <h2>Top Decisions</h2>
+      {% if decisions.decisions %}
+        {% for decision in decisions.decisions[:3] %}
+          <div class="card">
+            <h3>
+              {{ decision.question }}
+              <span class="badge">{{ decision.status }}</span>
+            </h3>
+            {% set recommended = None %}
+            {% if decision.recommended_coa_id %}
+              {% for coa in decisions.courses_of_action %}
+                {% if coa.id == decision.recommended_coa_id %}
+                  {% set recommended = coa %}
+                  {% break %}
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+            {% if recommended %}
+              <div class="muted">Recommended COA</div>
+              <div>
+                <strong>{{ recommended.label }}</strong>
+                <span class="badge">Risk: {{ recommended.risk_level }}</span>
+                <span class="badge">Policy: {{ recommended.policy_alignment }}</span>
+              </div>
+              <p>{{ recommended.summary }}</p>
+            {% else %}
+              <p class="muted">No recommended COA was selected.</p>
+            {% endif %}
+            {% if decision.rationale %}
+              <p><strong>Rationale:</strong> {{ decision.rationale }}</p>
+            {% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">No decisions are available for this mission.</p>
+      {% endif %}
+    </section>
+
+    <section class="section">
+      <h2>Courses of Action</h2>
+      {% if decisions.courses_of_action %}
+        {% for decision in decisions.decisions %}
+          {% set coas = decisions.courses_of_action | selectattr("decision_id", "equalto", decision.id) | list %}
+          {% if coas %}
+            <h3>{{ decision.question }}</h3>
+            {% for coa in coas %}
+              <div class="card">
+                <div>
+                  <strong>{{ coa.label }}</strong>
+                  <span class="badge">Risk: {{ coa.risk_level }}</span>
+                  <span class="badge">Policy: {{ coa.policy_alignment }}</span>
+                </div>
+                <p>{{ coa.summary }}</p>
+                {% if coa.pros %}
+                  <div>
+                    <span class="label">Pros</span>
+                    <ul>
+                      {% for pro in coa.pros %}
+                        <li>{{ pro }}</li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+                {% if coa.cons %}
+                  <div>
+                    <span class="label">Cons</span>
+                    <ul>
+                      {% for con in coa.cons %}
+                        <li>{{ con }}</li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+                {% if coa.policy_refs %}
+                  <div class="muted">Policy refs: {{ coa.policy_refs | join(", ") }}</div>
+                {% endif %}
+              </div>
+            {% endfor %}
+          {% endif %}
+        {% endfor %}
+
+        {% set unmatched = decisions.courses_of_action | rejectattr("decision_id", "in", decisions.decisions | map(attribute="id") | list) | list %}
+        {% if unmatched %}
+          <h3>Ungrouped Courses of Action</h3>
+          {% for coa in unmatched %}
+            <div class="card">
+              <div>
+                <strong>{{ coa.label }}</strong>
+                <span class="badge">Risk: {{ coa.risk_level }}</span>
+                <span class="badge">Policy: {{ coa.policy_alignment }}</span>
+              </div>
+              <p>{{ coa.summary }}</p>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% else %}
+        <p class="muted">No courses of action were generated.</p>
+      {% endif %}
+    </section>
+
+    <section class="section">
+      <h2>Policy &amp; Blind Spots</h2>
+      <div class="two-col">
+        <div>
+          <h3>Policy Checks</h3>
+          {% if decisions.policy_checks %}
+            {% for check in decisions.policy_checks %}
+              <div class="card policy">
+                <div>
+                  <strong>{{ check.rule_name }}</strong>
+                  <span class="badge">{{ check.outcome }}</span>
+                </div>
+                <p>{{ check.summary }}</p>
+                <div class="muted">Source: {{ check.source_ref }}</div>
+              </div>
+            {% endfor %}
+          {% else %}
+            <p class="muted">No policy checks were reported.</p>
+          {% endif %}
+        </div>
+        <div>
+          <h3>Blind Spots</h3>
+          {% if decisions.blind_spots %}
+            {% for spot in decisions.blind_spots %}
+              <div class="card blind-spot">
+                <div>
+                  <strong>{{ spot.description }}</strong>
+                  <span class="badge">Impact: {{ spot.impact }}</span>
+                </div>
+                {% if spot.mitigation %}
+                  <p><strong>Mitigation:</strong> {{ spot.mitigation }}</p>
+                {% endif %}
+              </div>
+            {% endfor %}
+          {% else %}
+            <p class="muted">No blind spots documented.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+  </body>
+</html>

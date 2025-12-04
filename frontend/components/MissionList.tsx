@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import type { Mission } from "@/lib/api";
 import { MissionActions } from "@/components/MissionActions";
+import PolicyFootprint from "@/components/PolicyFootprint";
 
 interface MissionListProps {
   missions: Mission[];
@@ -35,6 +36,7 @@ export default function MissionList({ missions }: MissionListProps) {
               {mission.description && (
                 <p className="mt-1 text-sm text-slate-400 line-clamp-2">{mission.description}</p>
               )}
+              <PolicyFootprint mission={mission} layout="inline" showSecondary={false} />
             </div>
             <div className="flex flex-col items-end gap-1 text-right">
               <span className="text-xs uppercase tracking-wide text-slate-500">

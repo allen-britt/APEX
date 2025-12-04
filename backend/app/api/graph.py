@@ -1,13 +1,16 @@
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.db.session import get_db
+from app.services.kg_client import KgClient, KgClientError
+from app.services.namespace_service import ensure_mission_namespace
 
 
 router = APIRouter(tags=["graph"])
+_kg_client = KgClient()
 
 
 def _ensure_mission(mission_id: int, db: Session) -> models.Mission:
@@ -101,3 +104,86 @@ def delete_events_for_mission(mission_id: int, db: Session = Depends(get_db)) ->
         db.delete(event)
 
     db.commit()
+
+
+def _require_project_id(mission: models.Mission) -> str:
+    if mission.kg_namespace:
+        return mission.kg_namespace
+    # Fall back to the KgClient naming convention if namespace isn't persisted yet
+    return KgClient.project_id_from_mission(mission.id)
+
+
+@router.get("/missions/{mission_id}/kg/summary")
+def get_mission_kg_summary(
+    mission_id: int,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    mission = _ensure_mission(mission_id, db)
+    project_id = ensure_mission_namespace(mission, db=db)
+    try:
+        return _kg_client.get_summary(project_id)
+    except KgClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch mission KG summary",
+        ) from exc
+
+
+@router.get("/missions/{mission_id}/kg/full")
+def get_mission_full_graph(
+    mission_id: int,
+    limit_nodes: int = 400,
+    limit_edges: int = 800,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    mission = _ensure_mission(mission_id, db)
+    project_id = ensure_mission_namespace(mission, db=db)
+    try:
+        return _kg_client.get_full_graph(
+            project_id,
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
+        )
+    except KgClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch mission KG graph",
+        ) from exc
+
+
+@router.get("/missions/{mission_id}/kg/neighborhood")
+def get_mission_kg_neighborhood(
+    mission_id: int,
+    node_id: str,
+    hops: int = 2,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    mission = _ensure_mission(mission_id, db)
+    if not node_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="node_id is required")
+
+    project_id = ensure_mission_namespace(mission, db=db)
+    try:
+        return _kg_client.get_neighborhood(project_id, node_id, hops=hops)
+    except KgClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch KG neighborhood",
+        ) from exc
+
+
+@router.get("/missions/{mission_id}/kg/suggest-links")
+def get_mission_kg_suggested_links(
+    mission_id: int,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    mission = _ensure_mission(mission_id, db)
+    project_id = ensure_mission_namespace(mission, db=db)
+    try:
+        return _kg_client.get_suggested_links(project_id, limit=limit)
+    except KgClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch KG link suggestions",
+        ) from exc

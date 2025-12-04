@@ -1,13 +1,87 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
-from typing import Dict, List
+import re
+from typing import Any, Dict, List
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models
-from app.services import extraction_service, guardrail_service, llm_client
+from app.services import (
+    authority_history,
+    extraction_service,
+    guardrail_service,
+    llm_client,
+)
+from app.services.aggregator_client import AggregatorClient, AggregatorClientError
+from app.services.prompt_builder import build_global_system_prompt
+
+
+logger = logging.getLogger(__name__)
+_aggregator_client = AggregatorClient()
+
+
+FACTS_TASK_INSTRUCTIONS = """
+You are an intelligence analysis assistant. Extract raw factual statements from the mission sources and knowledge graph.
+- Do not include hypotheticals, speculation, or recommendations.
+- Prefer concise, atomic statements (who/what/when/where/how).
+- Respect all authority and INT guardrails included in this system prompt.
+""".strip()
+
+INFORMATION_GAPS_TASK_INSTRUCTIONS = """
+You are reviewing the mission to identify information gaps.
+- Highlight missing or weak INT coverage, specifying INT types or time windows.
+- Call out entities or events that lack sufficient corroboration.
+- Use knowledge graph metrics to flag areas that are too sparse for confident analysis.
+- Separate evidence-backed findings from speculative gaps and respect all guardrails.
+""".strip()
+
+CROSS_DOC_TASK_INSTRUCTIONS = """
+You are performing cross-document and cross-source analysis.
+- Surface corroborated findings, contradictions, and notable trends.
+- Cite only what is supported by the mission context or knowledge graph.
+- Respect authority and INT constraints.
+""".strip()
+
+ANALYSIS_GUARDRAIL_RULES = """
+You are an intelligence analyst supporting a law-enforcement investigation.
+You will receive structured JSON describing the mission authority, entities, events, and knowledge-graph highlights.
+You MUST:
+- Use ONLY the information in that JSON.
+- NOT invent incidents, locations, agencies, subjects, vehicles, or organizations that are not present in the JSON.
+- NOT invent named groups or describe the mission as "Federal" unless the JSON explicitly says so.
+- If information is missing, explicitly note the gap with 'None available'.
+- Never mention JSON, 'context', 'mission text', or 'Agent Run Advisory' in your response.
+- Do not reference variable names (e.g., evidence.incidents[0], Event ID 3) or describe what inputs you received.
+- Write as a final, human analyst product for case officers—no meta narration.
+""".strip()
+
+ESTIMATE_TASK_INSTRUCTIONS = f"""{ANALYSIS_GUARDRAIL_RULES}
+Produce a 2-3 paragraph operational estimate covering situation, threat/adversary posture, friendly considerations, and risk. Ground every statement in available documents or the knowledge graph and call out limitations if coverage is sparse.
+""".strip()
+
+SUMMARY_TASK_INSTRUCTIONS = f"""{ANALYSIS_GUARDRAIL_RULES}
+Provide a concise narrative (<=120 words) focused on intent, capability, and risk.
+""".strip()
+
+NEXT_STEPS_TASK_INSTRUCTIONS = f"""{ANALYSIS_GUARDRAIL_RULES}
+Recommend 3-7 concrete follow-up actions (collection, coordination, verification, tasking). Ensure each action is legal for the current authority and INT set, and tie it to identified gaps.
+""".strip()
+
+SELF_VERIFY_TASK_INSTRUCTIONS = """
+You are reviewing the analytic output for internal consistency and quality.
+- Identify contradictions, weak sourcing, or logical gaps.
+- Provide notes on any deficiencies while respecting guardrails.
+""".strip()
+
+DELTA_TASK_INSTRUCTIONS = """
+You are comparing the previous agent run with the current one.
+- Describe what is new, unchanged, or escalating.
+- Reference events and findings from mission context and the knowledge graph only.
+""".strip()
 
 
 def _parse_timestamp(value) -> datetime | None:
@@ -33,6 +107,19 @@ def _normalize_name(value: str) -> str:
 
 def _normalize_title(value: str) -> str:
     return " ".join((value or "").strip().lower().split())
+
+
+def _coerce_location(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item).strip() for item in value if item]
+        return "; ".join(part for part in parts if part) or None
+    if isinstance(value, dict):
+        name = value.get("name") if isinstance(value.get("name"), str) else None
+        return name or (str(value).strip() or None)
+    coerced = str(value).strip()
+    return coerced or None
 
 
 def _build_mission_context(mission: models.Mission, documents: List[models.Document]) -> str:
@@ -62,6 +149,145 @@ def _build_mission_context(mission: models.Mission, documents: List[models.Docum
     return "\n\n".join(section for section in sections if section.strip())
 
 
+def _build_prompt_context(
+    mission: models.Mission,
+    history_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    context: Dict[str, Any] = {
+        "authority": mission.mission_authority,
+        "int_types": list(mission.int_types or []),
+        "authority_history": history_payload.get("entries") or [],
+        "mission": {
+            "id": mission.id,
+            "name": mission.name,
+            "mission_authority": mission.mission_authority,
+            "int_types": list(mission.int_types or []),
+            "authority_history": history_payload.get("entries") or [],
+            "created_at": mission.created_at.isoformat() if mission.created_at else None,
+        },
+    }
+
+
+def _build_analysis_corpus(
+    mission: models.Mission,
+    documents: List[models.Document],
+    entities: List[models.Entity],
+    events: List[models.Event],
+) -> str:
+    parts: List[str] = [
+        mission.name or "",
+        mission.description or "",
+        mission.mission_authority or "",
+        mission.original_authority or "",
+    ]
+    for doc in documents:
+        parts.extend(filter(None, [getattr(doc, "title", None), getattr(doc, "content", None)]))
+    for entity in entities:
+        parts.extend(filter(None, [getattr(entity, "name", None), getattr(entity, "description", None)]))
+    for event in events:
+        parts.extend(
+            filter(
+                None,
+                [
+                    getattr(event, "title", None),
+                    getattr(event, "summary", None),
+                    getattr(event, "location", None),
+                ],
+            )
+        )
+    return " \n".join(parts).lower()
+
+
+def _sanitize_analysis_text(text: str | None, mission: models.Mission, source_corpus: str) -> str | None:
+    if not text:
+        return text
+    sanitized = text
+
+    def _replace(pattern: str, replacement: str) -> None:
+        nonlocal sanitized
+        sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+
+    meta_phrases = [
+        "provided mission text",
+        "provided mission",
+        "provided json",
+        "provided entities",
+        "provided events",
+        "provided context",
+        "mission text",
+        "context outlines",
+        "agent run advisory",
+        "based on the provided",
+        "in the provided",
+    ]
+    for phrase in meta_phrases:
+        _replace(re.escape(phrase), "")
+
+    _replace(r"event id\s*\d+", "")
+    _replace(r"evidence\.[a-zA-Z0-9_]+\[[0-9]+\]", "")
+
+    authority = (mission.mission_authority or "").strip()
+    if authority.upper() == "LEO":
+        _replace(r"federal law enforcement", authority.title())
+        _replace(r"federal", authority.title())
+
+    if "city hall" in sanitized.lower() and "city hall" not in source_corpus:
+        _replace(r"city hall", "local government facility")
+
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    return sanitized
+
+    kg_summary = None
+    if mission.kg_namespace:
+        try:
+            kg_summary = _aggregator_client.get_graph_summary(mission.kg_namespace)
+        except AggregatorClientError:
+            logger.warning(
+                "Failed to fetch KG summary for mission %s (namespace=%s)",
+                mission.id,
+                mission.kg_namespace,
+                exc_info=True,
+            )
+
+    if isinstance(kg_summary, dict):
+        context["kg_summary"] = kg_summary
+        context["mission"]["kg_summary"] = kg_summary
+
+    return context
+
+
+def _build_facts_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, FACTS_TASK_INSTRUCTIONS)
+
+
+def _build_gaps_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, INFORMATION_GAPS_TASK_INSTRUCTIONS)
+
+
+def _build_cross_doc_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, CROSS_DOC_TASK_INSTRUCTIONS)
+
+
+def _build_estimate_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, ESTIMATE_TASK_INSTRUCTIONS)
+
+
+def _build_summary_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, SUMMARY_TASK_INSTRUCTIONS)
+
+
+def _build_next_steps_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, NEXT_STEPS_TASK_INSTRUCTIONS)
+
+
+def _build_self_verify_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, SELF_VERIFY_TASK_INSTRUCTIONS)
+
+
+def _build_delta_system_prompt(prompt_context: Dict[str, Any]) -> str:
+    return build_global_system_prompt(prompt_context, DELTA_TASK_INSTRUCTIONS)
+
+
 def _entity_to_dict(entity: models.Entity) -> dict:
     return {
         "id": entity.id,
@@ -86,8 +312,60 @@ def _event_to_dict(event: models.Event) -> dict:
     }
 
 
+def _ingest_structured_graph_payload(
+    mission: models.Mission,
+    entities: List[Dict],
+    events: List[Dict],
+    *,
+    profile: str,
+) -> None:
+    if not mission.kg_namespace:
+        return
+    if not entities and not events:
+        return
+
+    payload = {
+        "kind": "structured_entities_events",
+        "mission_id": mission.id,
+        "mission_name": mission.name,
+        "profile": profile,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "entities": entities,
+        "events": events,
+    }
+    history_payload = authority_history.build_authority_history_payload(mission)
+    metadata = {
+        "source": "apex_agent_cycle",
+        "mission_id": mission.id,
+        "mission_authority": mission.mission_authority,
+        "int_types": list(mission.int_types or []),
+        "profile": profile,
+        "original_authority": mission.original_authority,
+        "authority_history": history_payload["lines"],
+    }
+
+    try:
+        _aggregator_client.ingest_json_payload(
+            mission.kg_namespace,
+            title=f"structured-extract-{mission.id}",
+            payload=payload,
+            metadata=metadata,
+        )
+    except AggregatorClientError:
+        logger.warning(
+            "Failed to ingest structured KG payload",
+            exc_info=True,
+            extra={"mission_id": mission.id},
+        )
+
+
 async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint") -> models.AgentRun:
     """Execute the end-to-end APEX agent cycle for a mission."""
+
+    try:
+        profile_enum = extraction_service.AnalysisProfile(profile)
+    except ValueError:
+        profile_enum = extraction_service.AnalysisProfile.HUMINT
 
     mission = db.query(models.Mission).filter(models.Mission.id == mission_id).first()
     if not mission:
@@ -100,13 +378,38 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         .all()
     )
 
+    history_payload = authority_history.build_authority_history_payload(mission)
+    prompt_context = _build_prompt_context(mission, history_payload)
+    facts_system_prompt = _build_facts_system_prompt(prompt_context)
+    gaps_system_prompt = _build_gaps_system_prompt(prompt_context)
+    cross_doc_system_prompt = _build_cross_doc_system_prompt(prompt_context)
+    estimate_system_prompt = _build_estimate_system_prompt(prompt_context)
+    summary_system_prompt = _build_summary_system_prompt(prompt_context)
+    next_steps_system_prompt = _build_next_steps_system_prompt(prompt_context)
+    self_verify_system_prompt = _build_self_verify_system_prompt(prompt_context)
+    delta_system_prompt = _build_delta_system_prompt(prompt_context)
     mission_context = _build_mission_context(mission, documents)
-    facts = await llm_client.extract_raw_facts(mission_context, profile=profile) if mission_context else []
+    facts = (
+        await llm_client.extract_raw_facts(
+            mission_context,
+            profile=profile_enum.value,
+            policy_block=facts_system_prompt,
+        )
+        if mission_context
+        else []
+    )
 
     entities_payload, events_payload = await extraction_service.extract_entities_and_events_for_mission(
         mission,
         documents,
-        profile=profile,
+        profile=profile_enum.value,
+    )
+
+    _ingest_structured_graph_payload(
+        mission,
+        entities_payload,
+        events_payload,
+        profile=profile_enum.value,
     )
 
     existing_entities = (
@@ -182,13 +485,24 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         if key in existing_event_keys:
             continue
 
+        raw_location = event_payload.get("location")
+        location_value = _coerce_location(raw_location)
+
+        involved_ids = event_payload.get("involved_entity_ids")
+        if involved_ids is None:
+            involved_ids_serialized = json.dumps([])
+        elif isinstance(involved_ids, str):
+            involved_ids_serialized = involved_ids
+        else:
+            involved_ids_serialized = json.dumps(involved_ids)
+
         event_model = models.Event(
             mission_id=mission.id,
             title=raw_title.strip(),
             summary=event_payload.get("summary"),
             timestamp=timestamp,
-            location=event_payload.get("location"),
-            involved_entity_ids=event_payload.get("involved_entity_ids", []),
+            location=location_value,
+            involved_entity_ids=involved_ids_serialized,
         )
         db.add(event_model)
         created_events.append(event_model)
@@ -214,12 +528,14 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
 
     entity_dicts = [_entity_to_dict(entity) for entity in entities]
     event_dicts = [_event_to_dict(event) for event in events]
+    analysis_corpus = _build_analysis_corpus(mission, documents, entities, events)
 
     gaps_result = await llm_client.detect_information_gaps(
         facts,
         entity_dicts,
         event_dicts,
         profile=profile,
+        policy_block=gaps_system_prompt,
     )
     gaps = gaps_result.get("gaps", [])
 
@@ -228,6 +544,7 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         entity_dicts,
         event_dicts,
         profile=profile,
+        policy_block=cross_doc_system_prompt,
     )
 
     operational_estimate = await llm_client.generate_operational_estimate(
@@ -235,9 +552,17 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         entity_dicts,
         event_dicts,
         profile=profile,
+        policy_block=estimate_system_prompt,
     )
+    operational_estimate = _sanitize_analysis_text(operational_estimate, mission, analysis_corpus)
 
-    summary_core = await llm_client.summarize_mission(entity_dicts, event_dicts, profile=profile)
+    summary_core = await llm_client.summarize_mission(
+        entity_dicts,
+        event_dicts,
+        profile=profile,
+        policy_block=summary_system_prompt,
+    )
+    summary_core = _sanitize_analysis_text(summary_core, mission, analysis_corpus)
 
     cross_sections = []
     if cross_analysis:
@@ -258,7 +583,14 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
     if cross_sections:
         summary_parts.append("Cross-Document Insights:\n" + "\n".join(cross_sections))
     summary = "\n\n".join(part for part in summary_parts if part)
-    next_steps = await llm_client.suggest_next_steps(entity_dicts, event_dicts, profile=profile)
+    summary = _sanitize_analysis_text(summary, mission, analysis_corpus)
+    next_steps = await llm_client.suggest_next_steps(
+        entity_dicts,
+        event_dicts,
+        profile=profile,
+        policy_block=next_steps_system_prompt,
+    )
+    next_steps = _sanitize_analysis_text(next_steps, mission, analysis_corpus)
 
     verification = await llm_client.self_verify_assessment(
         facts,
@@ -267,6 +599,7 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         summary_core,
         operational_estimate,
         profile=profile,
+        policy_block=self_verify_system_prompt,
     )
 
     previous_run = (
@@ -281,11 +614,25 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         previous_event_dicts,
         summary_core,
         event_dicts,
+        policy_block=delta_system_prompt,
     )
 
     guardrail_service.set_guardrail_context(has_docs=bool(documents))
-    base_guardrail = guardrail_service.run_guardrails(summary, next_steps)
-    analytic_status, analytic_issues = await guardrail_service.evaluate_guardrails(
+    history_lines = history_payload["lines"]
+    has_pivots = any(entry.get("type") == "pivot" for entry in history_payload["entries"])
+    guardrail_metadata = {
+        "original_authority": mission.original_authority,
+        "current_authority": mission.mission_authority,
+        "has_pivots": has_pivots,
+    }
+    base_guardrail = guardrail_service.run_guardrails(
+        summary,
+        next_steps,
+        authority=mission.mission_authority,
+        authority_history=history_lines,
+        authority_metadata=guardrail_metadata,
+    )
+    analytic_guardrail = await guardrail_service.evaluate_guardrails(
         facts=facts,
         entities=entity_dicts,
         events=event_dicts,
@@ -294,7 +641,13 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         gaps=gaps_result,
         cross=cross_analysis,
         profile=profile,
+        authority=mission.mission_authority,
+        policy_block=summary_system_prompt,
+        authority_history=history_lines,
+        authority_metadata=guardrail_metadata,
     )
+    analytic_status = analytic_guardrail["status"]
+    analytic_issues = analytic_guardrail.get("issues", [])
 
     status_rank = {"ok": 0, "warning": 1, "blocked": 2}
     analytic_rank = {"OK": 0, "CAUTION": 1, "REVIEW": 2}

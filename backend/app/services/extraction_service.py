@@ -6,6 +6,8 @@ from typing import Dict, List, Tuple
 from app import models
 from app.models import Document
 from app.services import llm_client
+from app.services.authority_history import build_authority_history_payload
+from app.services.policy_context import build_policy_prompt
 
 
 class AnalysisProfile(str, Enum):
@@ -80,11 +82,25 @@ async def extract_entities_and_events_for_mission(
     except ValueError:
         profile_enum = AnalysisProfile.HUMINT
 
+    authority_history = build_authority_history_payload(mission)
     context = _build_context(mission, documents, profile_enum)
     if not context:
         return [], []
 
-    entities = await llm_client.extract_entities(context, profile=profile_enum.value)
-    events = await llm_client.extract_events(context, profile=profile_enum.value)
+    policy_block = build_policy_prompt(
+        mission.mission_authority,
+        mission.int_types,
+        authority_history=authority_history["lines"],
+    )
+    entities = await llm_client.extract_entities(
+        context,
+        profile=profile_enum.value,
+        policy_block=policy_block,
+    )
+    events = await llm_client.extract_events(
+        context,
+        profile=profile_enum.value,
+        policy_block=policy_block,
+    )
 
     return _dedupe_entities(entities), events

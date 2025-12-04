@@ -1,13 +1,40 @@
-from typing import List
+from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
+from app.config_documents import get_mission_documents_storage_dir
+from app.services.ingest_job_service import MissionIngestJobService
+from app.services.mission_document_service import (
+    MissionDocumentService,
+    MissionDocumentServiceError,
+)
 
 
 router = APIRouter(tags=["documents"])
+_ingest_job_service = MissionIngestJobService()
+_mission_doc_service = MissionDocumentService(
+    storage_dir=get_mission_documents_storage_dir(),
+    ingest_job_service=_ingest_job_service,
+)
+
+
+def _drain_ingest_jobs(mission_id: Optional[int] = None) -> None:
+    db = SessionLocal()
+    try:
+        processed = _ingest_job_service.process_pending_jobs(db, mission_id=mission_id)
+        if processed:
+            # logger import is optional; rely on router logger if desired
+            pass
+    finally:
+        db.close()
+
+
+def _schedule_ingest_drain(background_tasks: BackgroundTasks, mission_id: Optional[int]) -> None:
+    background_tasks.add_task(_drain_ingest_jobs, mission_id)
 
 
 def _get_mission_or_404(mission_id: int, db: Session) -> models.Mission:
@@ -40,6 +67,125 @@ def create_document(
     db.commit()
     db.refresh(document)
     return document
+
+
+@router.post(
+    "/missions/{mission_id}/documents/upload",
+    response_model=schemas.MissionDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_mission_document(
+    mission_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    title: str | None = Form(None),
+    primary_int: str | None = Form(None),
+    int_types: Annotated[List[str] | None, Form()] = None,
+    db: Session = Depends(get_db),
+):
+    mission = _get_mission_or_404(mission_id, db)
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+
+    int_types = int_types or []
+
+    try:
+        document = _mission_doc_service.ingest_file(
+            db=db,
+            mission=mission,
+            filename=title or file.filename,
+            data=data,
+            primary_int=primary_int,
+            int_types=int_types,
+        )
+    except MissionDocumentServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    _schedule_ingest_drain(background_tasks, mission_id)
+    return document
+
+
+@router.post(
+    "/missions/{mission_id}/documents/url",
+    response_model=schemas.MissionDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_mission_document_url(
+    mission_id: int,
+    payload: schemas.MissionDocumentUrlRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    mission = _get_mission_or_404(mission_id, db)
+    try:
+        response = httpx.get(str(payload.url), timeout=15)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to fetch URL") from exc
+
+    text = response.text.strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fetched URL contains no text")
+
+    try:
+        document = _mission_doc_service.ingest_text(
+            db=db,
+            mission=mission,
+            source_type="url",
+            title=payload.title or str(payload.url),
+            primary_int=payload.primary_int,
+            int_types=payload.int_types,
+            text_content=text,
+        )
+    except MissionDocumentServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    _schedule_ingest_drain(background_tasks, mission_id)
+    return document
+
+
+@router.get(
+    "/missions/{mission_id}/mission-documents",
+    response_model=List[schemas.MissionDocumentResponse],
+)
+def list_mission_documents(
+    mission_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_mission_or_404(mission_id, db)
+    return (
+        db.query(models.MissionDocument)
+        .filter(models.MissionDocument.mission_id == mission_id)
+        .order_by(models.MissionDocument.created_at.desc())
+        .all()
+    )
+
+
+@router.get(
+    "/missions/{mission_id}/ingest-jobs",
+    response_model=List[schemas.MissionIngestJobResponse],
+)
+def list_mission_ingest_jobs(
+    mission_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_mission_or_404(mission_id, db)
+    return _ingest_job_service.list_jobs_for_mission(db, mission_id)
+
+
+@router.post(
+    "/missions/{mission_id}/ingest-jobs/drain",
+    response_model=schemas.MissionIngestJobDrainResponse,
+)
+def drain_mission_ingest_jobs(
+    mission_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    mission = _get_mission_or_404(mission_id, db)
+    _schedule_ingest_drain(background_tasks, mission.id)
+    return schemas.MissionIngestJobDrainResponse(mission_id=mission.id)
 
 
 @router.get(

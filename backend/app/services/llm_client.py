@@ -9,15 +9,93 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Callable, List, TypeVar
+from typing import Any, Callable, Dict, List, Literal, TypedDict, TypeVar
 
 import httpx
 
-from app.config_llm import get_llm_config, is_demo_mode
+from app.config_llm import (
+    get_active_llm_name,
+    get_available_llms,
+    get_llm_by_name,
+    get_llm_config,
+    is_demo_mode,
+)
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+Role = Literal["system", "user", "assistant"]
+
+
+class ChatMessage(TypedDict):
+    role: Role
+    content: str
+
+
+class LlmError(Exception):
+    """Raised when an LLM request fails."""
+
+
+class LLMClient:
+    """Unified client for local LLMs (Ollama or other backends)."""
+
+    def __init__(self, timeout: float = 60.0) -> None:
+        self._timeout = timeout
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": model.name, "display_name": model.display_name, "kind": model.kind}
+            for model in get_available_llms()
+        ]
+
+    def _call_ollama_chat(
+        self,
+        *,
+        base_url: str,
+        model_name: str,
+        messages: List[ChatMessage],
+        timeout: float | None = None,
+    ) -> str:
+        url = f"{base_url.rstrip('/')}/api/chat"
+        payload: Dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "stream": False,
+        }
+
+        request_timeout = timeout or self._timeout
+        try:
+            logger.debug("Calling Ollama chat at %s with model=%s", url, model_name)
+            response = httpx.post(url, json=payload, timeout=request_timeout)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:  # pragma: no cover - network paths
+            logger.exception("LLM request failed (Ollama)")
+            raise LlmError("LLM request to Ollama failed") from exc
+
+        data = response.json()
+        try:
+            return data["message"]["content"]
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Unexpected Ollama response: %s", data)
+            raise LlmError("Unexpected Ollama response format") from exc
+
+    def chat(self, messages: List[ChatMessage], *, timeout: float | None = None) -> str:
+        active_name = get_active_llm_name()
+        cfg = get_llm_by_name(active_name)
+
+        if cfg.kind == "ollama_chat":
+            return self._call_ollama_chat(
+                base_url=cfg.base_url,
+                model_name=cfg.name,
+                messages=messages,
+                timeout=timeout,
+            )
+
+        raise LlmError(f"Unsupported LLM engine kind: {cfg.kind!r}")
+
+
+_CHAT_CLIENT = LLMClient()
 
 _active_model: str | None = None
 
@@ -230,13 +308,30 @@ EXTRACTION_SYSTEM_PROMPT = (
     " You must return ONLY valid JSON arrays with no commentary, preamble, or explanation."
 )
 
+SUMMARY_TASK_INSTRUCTIONS = (
+    "You are summarizing the mission for decision makers."
+    " Provide a concise narrative (<=120 words) focused on intent, capabilities, and risk."
+    " Use the structured entities/events and KG context only."  # enforcement handled upstream
+)
+
+NEXT_STEPS_TASK_INSTRUCTIONS = (
+    "You recommend tactical next steps"
+    " grounded only in the structured context provided."
+)
+
+META_BAN_RULES = (
+    "Do NOT mention 'mission text', 'JSON', 'context', 'Agent Run Advisory', internal variable names (e.g., evidence.incidents[0]), or Event IDs in your response."
+)
+
 SUMMARY_SYSTEM_PROMPT = (
     "You are a strategic intelligence analyst. Produce concise, objective assessments "
-    "based solely on the provided structured context."
+    "based solely on the provided structured context. "
+    f"{META_BAN_RULES}"
 )
 
 NEXT_STEPS_SYSTEM_PROMPT = (
-    "You are an operations planner. Recommend actionable follow-up steps based on the structured context."
+    "You are an operations planner. Recommend actionable follow-up steps based on the structured context. "
+    f"{META_BAN_RULES}"
 )
 
 
@@ -244,35 +339,25 @@ def _profile_hint(profile: str) -> str:
     return PROFILE_FOCUS.get(profile.lower(), PROFILE_FOCUS["humint"])
 
 
-async def _call_llm(prompt: str, system: str | None = None) -> str:
-    """Invoke the configured LLM endpoint and return the response text."""
+async def _call_llm(
+    prompt: str,
+    system: str | None = None,
+    *,
+    policy_block: str | None = None,
+) -> str:
+    """Invoke the active local LLM via the unified LLMClient."""
 
-    config = get_llm_config()
-    headers = {"Content-Type": "application/json"}
-    if config.api_key:
-        headers["Authorization"] = f"Bearer {config.api_key}"
-
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    messages: List[ChatMessage] = []
+    combined_system = "\n\n".join(part for part in (policy_block, system) if part)
+    if combined_system:
+        messages.append({"role": "system", "content": combined_system})
     messages.append({"role": "user", "content": prompt})
 
-    payload = {"model": get_active_model(), "messages": messages}
-
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(config.base_url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:  # pragma: no cover - simple logging path
-        logger.exception("LLM call failed")
-        raise LLMCallException("LLM call failed") from exc
-
-    try:
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        logger.exception("Unexpected LLM response format: %s", data)
-        raise LLMCallException("Invalid LLM response format") from exc
+        return _CHAT_CLIENT.chat(messages)
+    except LlmError as exc:  # pragma: no cover - simple logging path
+        logger.exception("LLM chat call failed")
+        raise LLMCallException("LLM chat call failed") from exc
 
 
 def _build_entity_prompt(text: str, profile: str) -> str:
@@ -319,20 +404,26 @@ async def _with_llm_fallback(
     system: str | None,
     parse: Callable[[str], T],
     stub: Callable[[], T],
+    policy_block: str | None = None,
 ) -> T:
     if is_demo_mode():
         logger.info("LLM demo mode active, returning stubbed data.")
         return stub()
 
     try:
-        raw = await _call_llm(prompt, system=system)
+        raw = await _call_llm(prompt, system=system, policy_block=policy_block)
         return parse(raw)
     except Exception:
         logger.warning("LLM call failed or response invalid; falling back to stub", exc_info=True)
         return stub()
 
 
-async def extract_entities(text: str, profile: str = "humint") -> List[dict]:
+async def extract_entities(
+    text: str,
+    profile: str = "humint",
+    *,
+    policy_block: str | None = None,
+) -> List[dict]:
     prompt = _build_entity_prompt(text, profile)
 
     def _parse(raw: str) -> List[dict]:
@@ -346,10 +437,16 @@ async def extract_entities(text: str, profile: str = "humint") -> List[dict]:
         system=EXTRACTION_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_ENTITIES),
+        policy_block=policy_block,
     )
 
 
-async def extract_events(text: str, profile: str = "humint") -> List[dict]:
+async def extract_events(
+    text: str,
+    profile: str = "humint",
+    *,
+    policy_block: str | None = None,
+) -> List[dict]:
     prompt = _build_event_prompt(text, profile)
 
     def _parse(raw: str) -> List[dict]:
@@ -363,15 +460,30 @@ async def extract_events(text: str, profile: str = "humint") -> List[dict]:
         system=EXTRACTION_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_EVENTS),
+        policy_block=policy_block,
     )
 
 
-async def summarize_mission(entities: List[dict], events: List[dict], profile: str = "humint") -> str:
+async def summarize_mission(
+    entities: List[dict],
+    events: List[dict],
+    profile: str = "humint",
+    *,
+    policy_block: str | None = None,
+) -> str:
+    guardrail = (
+        "You are an intelligence analyst supporting this mission."
+        " Use ONLY the entities/events JSON."
+        " Do NOT invent new incidents, locations, or organizations."
+        " Do NOT mention JSON, mission text, context, Agent Run Advisory, or variable names like Event ID 3 or evidence.incidents[0]."
+        " If data is missing, note 'None available'."
+        " Write as a final product, not as an explanation of inputs."
+    )
     context_json = _serialize_context(entities, events)
     prompt = (
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
-        "Task: Produce a concise (<=120 words) analytic summary highlighting intent, capabilities, and assessed risk.\n"
-        "Use ONLY the structured context below.\n"
+        f"{guardrail}\n"
+        "Task: Produce a concise (<=120 words) analytic summary highlighting intent, capabilities, and assessed risk without referencing JSON or 'context'.\n"
         "Input JSON (entities + events):\n"
         f"{context_json}"
     )
@@ -386,15 +498,31 @@ async def summarize_mission(entities: List[dict], events: List[dict], profile: s
         system=SUMMARY_SYSTEM_PROMPT,
         parse=lambda raw: raw,
         stub=_stub,
+        policy_block=policy_block,
     )
 
 
-async def suggest_next_steps(entities: List[dict], events: List[dict], profile: str = "humint") -> str:
+async def suggest_next_steps(
+    entities: List[dict],
+    events: List[dict],
+    profile: str = "humint",
+    *,
+    policy_block: str | None = None,
+) -> str:
+    guardrail = (
+        "You are an intelligence analyst recommending lawful next steps for this mission."
+        " Use ONLY the entities/events JSON."
+        " Do NOT invent new proper nouns or authorities."
+        " Do NOT mention JSON, mission text, context, Agent Run Advisory, or variable names like Event ID 3 or evidence.incidents[0]."
+        " If information is missing, state that a prerequisite is needed."
+        " Write as final tasking guidance, not as meta commentary."
+    )
     context_json = _serialize_context(entities, events)
     prompt = (
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
-        "Task: Recommend 3-7 actionable next steps (collection, coordination, verification, or tasking)."
-        " Respond with a brief numbered list or bullet list.\n"
+        f"{guardrail}\n"
+        "Task: Recommend 3-7 actionable next steps (collection, coordination, verification, or tasking) tied to the available evidence."
+        " Respond with a brief numbered list or bullet list without referencing JSON.\n"
         "Input JSON (entities + events):\n"
         f"{context_json}"
     )
@@ -413,10 +541,16 @@ async def suggest_next_steps(entities: List[dict], events: List[dict], profile: 
         system=NEXT_STEPS_SYSTEM_PROMPT,
         parse=lambda raw: raw,
         stub=_stub,
+        policy_block=policy_block,
     )
 
 
-async def extract_raw_facts(text: str, profile: str = "humint") -> List[dict]:
+async def extract_raw_facts(
+    text: str,
+    profile: str = "humint",
+    *,
+    policy_block: str | None = None,
+) -> List[dict]:
     prompt = (
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
         "Extract atomic mission facts. Each fact must be a single statement without conjunctions.\n"
@@ -437,6 +571,7 @@ async def extract_raw_facts(text: str, profile: str = "humint") -> List[dict]:
         system=RAW_FACTS_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_FACTS),
+        policy_block=policy_block,
     )
 
 
@@ -445,6 +580,8 @@ async def detect_information_gaps(
     entities: List[dict],
     events: List[dict],
     profile: str = "humint",
+    *,
+    policy_block: str | None = None,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -471,6 +608,7 @@ async def detect_information_gaps(
         system=GAP_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_GAPS),
+        policy_block=policy_block,
     )
 
 
@@ -479,6 +617,8 @@ async def generate_operational_estimate(
     entities: List[dict],
     events: List[dict],
     profile: str = "humint",
+    *,
+    policy_block: str | None = None,
 ) -> str:
     payload = {
         "profile": profile,
@@ -498,6 +638,7 @@ async def generate_operational_estimate(
         system=ESTIMATE_SYSTEM_PROMPT,
         parse=lambda raw: raw,
         stub=lambda: DEMO_OPERATIONAL_ESTIMATE,
+        policy_block=policy_block,
     )
 
 
@@ -506,6 +647,8 @@ async def generate_run_delta(
     previous_events: List[dict],
     current_summary: str,
     current_events: List[dict],
+    *,
+    policy_block: str | None = None,
 ) -> str:
     payload = {
         "previous_summary": previous_summary,
@@ -524,6 +667,7 @@ async def generate_run_delta(
         system=DELTA_SYSTEM_PROMPT,
         parse=lambda raw: raw,
         stub=lambda: DEMO_DELTA_SUMMARY,
+        policy_block=policy_block,
     )
 
 
@@ -532,6 +676,8 @@ async def cross_document_analysis(
     entities: List[dict],
     events: List[dict],
     profile: str = "humint",
+    *,
+    policy_block: str | None = None,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -559,6 +705,7 @@ async def cross_document_analysis(
         system=CROSS_DOC_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_CROSS_DOCUMENT),
+        policy_block=policy_block,
     )
 
 
@@ -569,6 +716,8 @@ async def self_verify_assessment(
     summary: str,
     estimate: str,
     profile: str = "humint",
+    *,
+    policy_block: str | None = None,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -603,6 +752,7 @@ async def self_verify_assessment(
         system=SELF_VERIFY_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_SELF_VERIFY),
+        policy_block=policy_block,
     )
 
 
@@ -612,6 +762,8 @@ async def guardrail_quality_review(
     gaps: dict,
     cross: dict,
     profile: str = "humint",
+    *,
+    policy_block: str | None = None,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -643,4 +795,5 @@ async def guardrail_quality_review(
         system=GUARDRAIL_REVIEW_SYSTEM_PROMPT,
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_GUARDRAIL_REVIEW),
+        policy_block=policy_block,
     )

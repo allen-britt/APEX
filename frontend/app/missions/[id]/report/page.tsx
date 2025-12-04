@@ -1,6 +1,8 @@
 import Link from "next/link";
 
 import PrintButton from "@/components/PrintButton";
+import TemplateReportGenerator from "@/components/TemplateReportGenerator";
+import PolicyFootprint from "@/components/PolicyFootprint";
 import {
   getMissionReport,
   fetchActiveModelInfo,
@@ -417,11 +419,22 @@ export default async function MissionReportPage({ params, searchParams }: Missio
             </div>
           </header>
 
+          <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6 print:hidden">
+            <TemplateReportGenerator
+              missionId={mission.id}
+              mission={mission}
+              variant="full"
+              guardrailStatus={guardrailStatus}
+              guardrailIssues={guardrail?.issues ?? []}
+            />
+          </section>
+
           <section id="section-1" className="rounded-xl border border-slate-800 bg-slate-950/30 p-6 print:border-slate-300 print:bg-white">
             <h2 className="text-xl font-semibold">1. Mission Overview</h2>
             <p className="mt-2 text-sm text-slate-300">Generated {formatDate(generatedAt)}</p>
-            <div className="mt-4 space-y-3 text-sm text-slate-200">
+            <div className="mt-4 space-y-4 text-sm text-slate-200">
               <p className="text-base text-slate-100">{mission.description || "No description provided."}</p>
+              <PolicyFootprint mission={mission} layout="stacked" />
               <ul className="list-disc space-y-1 pl-5">
                 <li>
                   <span className="font-semibold">Objective:</span> {missionObjective}

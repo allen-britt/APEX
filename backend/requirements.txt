@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+httpx
+python-dotenv
+orjson
+duckdb
+python-dateutil
+requests
+python-multipart
+jinja2
+markdown2>=2.4.0
+

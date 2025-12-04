@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 
-import { analyzeMission } from "@/lib/api";
+import { analyzeMission, type AgentRun } from "@/lib/api";
 
 type RunAnalysisButtonProps = {
   missionId: number;
-  onCompleted?: () => void;
+  onCompleted?: (run: AgentRun) => void;
 };
 
 export function RunAnalysisButton({ missionId, onCompleted }: RunAnalysisButtonProps) {
@@ -20,8 +20,8 @@ export function RunAnalysisButton({ missionId, onCompleted }: RunAnalysisButtonP
     setError(null);
 
     try {
-      await analyzeMission(missionId);
-      onCompleted?.();
+      const run = await analyzeMission(missionId);
+      onCompleted?.(run);
     } catch (err) {
       console.error("Failed to run analysis", err);
       setError("Failed to run analysis. Please try again.");

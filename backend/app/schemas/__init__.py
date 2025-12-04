@@ -1,7 +1,11 @@
-from datetime import datetime
-from typing import List, Optional, Union
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
+
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+
+from app.authorities import AuthorityType
 
 
 class ORMBase(BaseModel):
@@ -11,6 +15,10 @@ class ORMBase(BaseModel):
 class MissionBase(ORMBase):
     name: str
     description: Optional[str] = None
+    primary_authority: str = AuthorityType.LEO.value
+    original_authority: str = AuthorityType.LEO.value
+    secondary_authorities: List[str] = Field(default_factory=list)
+    int_types: List[str] = Field(default_factory=list)
 
 
 class MissionCreate(MissionBase):
@@ -21,6 +29,27 @@ class MissionResponse(MissionBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    kg_namespace: Optional[str] = None
+    gap_analysis: Optional[Dict[str, Any]] = None
+    template_reports: List[TemplateReportRecord] = Field(default_factory=list)
+    authority_pivots: List["MissionAuthorityPivotResponse"] = Field(default_factory=list)
+    latest_agent_run: Optional["AgentRunResponse"] = None
+
+
+class MissionAuthorityPivotResponse(ORMBase):
+    id: int
+    from_authority: str
+    to_authority: str
+    justification: str
+    risk: str
+    conditions: List[str] = Field(default_factory=list)
+    actor: Optional[str] = None
+    created_at: datetime
+
+
+class MissionAuthorityPivotRequest(BaseModel):
+    target_authority: str
+    justification: str
 
 
 class DocumentBase(ORMBase):
@@ -42,6 +71,50 @@ class DocumentResponse(DocumentBase):
     id: int
     mission_id: int
     created_at: datetime
+
+
+class MissionDocumentResponse(ORMBase):
+    id: str
+    mission_id: int
+    source_type: str
+    title: Optional[str] = None
+    original_path: Optional[str] = None
+    primary_int: Optional[str] = None
+    int_types: List[str] = Field(default_factory=list)
+    aggregator_doc_id: Optional[str] = None
+    status: str
+    created_at: datetime
+    ingest_status: Optional[str] = None
+    ingest_error: Optional[str] = None
+    kg_nodes_before: Optional[int] = None
+    kg_nodes_after: Optional[int] = None
+    kg_edges_before: Optional[int] = None
+    kg_edges_after: Optional[int] = None
+    kg_nodes_delta: Optional[int] = None
+    kg_edges_delta: Optional[int] = None
+
+
+class MissionDocumentUrlRequest(BaseModel):
+    url: HttpUrl
+    title: Optional[str] = None
+    primary_int: Optional[str] = None
+    int_types: List[str] = Field(default_factory=list)
+
+
+class MissionIngestJobResponse(ORMBase):
+    id: int
+    mission_id: int
+    document_id: str
+    status: str
+    attempts: int
+    last_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MissionIngestJobDrainResponse(BaseModel):
+    mission_id: int
+    scheduled: bool = True
 
 
 class EntityBase(ORMBase):
@@ -76,6 +149,150 @@ class EventResponse(EventBase):
     id: int
     mission_id: int
     created_at: datetime
+
+
+class GapFinding(BaseModel):
+    title: str
+    detail: Optional[str] = None
+    severity: str = "medium"
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class PriorityEntry(BaseModel):
+    name: str
+    reason: str
+    type: Optional[str] = None
+    score: Optional[float] = None
+    reference_id: Optional[int] = None
+
+
+class PrioritiesBlock(BaseModel):
+    entities: List[PriorityEntry] = Field(default_factory=list)
+    events: List[PriorityEntry] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class GapAnalysisResponse(BaseModel):
+    generated_at: datetime
+    kg_summary: Optional[Dict[str, Any]] = None
+    missing_data: List[GapFinding] = Field(default_factory=list)
+    time_gaps: List[GapFinding] = Field(default_factory=list)
+    conflicts: List[GapFinding] = Field(default_factory=list)
+    high_value_unknowns: List[GapFinding] = Field(default_factory=list)
+    quality_findings: List[GapFinding] = Field(default_factory=list)
+    priorities: PrioritiesBlock
+
+
+class GapItem(BaseModel):
+    id: str
+    description: str
+    severity: str = "medium"
+    int_types_impacted: List[str] = Field(default_factory=list)
+    evidence_notes: Optional[str] = None
+
+
+class RecommendedAction(BaseModel):
+    id: str
+    description: str
+    authority_scope: str
+    allowed_under_mission_authority: bool = True
+    rationale: Optional[str] = None
+    related_gap_ids: List[str] = Field(default_factory=list)
+
+
+class GapAnalysisResult(BaseModel):
+    mission_id: int
+    mission_authority: str
+    coverage_summary: Dict[str, Any] = Field(default_factory=dict)
+    gaps: List[GapItem] = Field(default_factory=list)
+    recommended_actions: List[RecommendedAction] = Field(default_factory=list)
+    overall_assessment: Optional[str] = None
+
+
+class ReportTemplateBase(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    int_type: Optional[str] = None
+    mission_domains: List[str] = Field(default_factory=list)
+    title10_allowed: bool = False
+    title50_allowed: bool = False
+    allowed_authorities: List[str] = Field(default_factory=list)
+    allowed_int_types: List[str] = Field(default_factory=list)
+    int_types: List[str] = Field(default_factory=list)
+
+
+class ReportTemplateSummary(ReportTemplateBase):
+    sections: List[str] = Field(default_factory=list)
+
+
+class ReportTemplateSection(BaseModel):
+    id: str
+    title: str
+    content: str
+
+
+class ReportTemplateResponse(BaseModel):
+    template_id: str
+    template_name: str
+    sections: List[ReportTemplateSection]
+    metadata: Dict[str, Any]
+
+
+class TemplateReportRecord(BaseModel):
+    id: str
+    template_id: str
+    template_name: str
+    sections: List[ReportTemplateSection]
+    metadata: Dict[str, Any]
+    stored_at: datetime
+
+
+class AuthorityInfo(BaseModel):
+    code: str
+    label: str
+    description: str
+    prompt_context: str
+    prohibitions: str
+    allowed_int_types: List[str] = Field(default_factory=list)
+    ok_examples: List[str] = Field(default_factory=list)
+    not_ok_examples: List[str] = Field(default_factory=list)
+
+
+class TemplateReportGenerateRequest(BaseModel):
+    template_id: str = Field(..., min_length=1)
+
+
+class TemplateReportGenerateResponse(BaseModel):
+    mission_id: int
+    template_id: str
+    template_name: str
+    html: str
+    markdown: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MissionDatasetBase(BaseModel):
+    name: str
+    status: str = "ready"
+    sources: Any
+    profile: Optional[Any] = None
+    semantic_profile: Optional[Any] = None
+
+
+class MissionDatasetCreate(MissionDatasetBase):
+    """Payload when creating a dataset via POST /missions/{id}/datasets."""
+    pass
+
+
+class MissionDatasetRead(MissionDatasetBase):
+    id: int
+    mission_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
 
 
 class AgentRunResponse(ORMBase):
@@ -229,3 +446,6 @@ class ApexReportDataset(BaseModel):
     guardrails: Optional[ApexGuardrailStatus] = None
     meta: ApexReportMeta
     delta: Optional[ApexDeltaSection] = None
+
+
+MissionResponse.model_rebuild()
