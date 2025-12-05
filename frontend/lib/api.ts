@@ -99,6 +99,56 @@ export interface Document {
   created_at: string;
 }
 
+export interface HumintIirParsedFields {
+  report_number?: string | null;
+  source_id?: string | null;
+  collection_unit?: string | null;
+  collection_date?: string | null;
+  report_date?: string | null;
+  region?: string | null;
+  target_persons?: string[];
+  target_locations?: string[];
+  summary?: string | null;
+  handling_instructions?: string | null;
+  [key: string]: string | string[] | null | undefined;
+}
+
+export interface HumintInsight {
+  id?: number | null;
+  title: string;
+  detail: string;
+  confidence: number;
+  supporting_evidence_ids: number[];
+}
+
+export interface HumintGap {
+  title: string;
+  description: string;
+  priority: number;
+  suggested_collection?: string | null;
+}
+
+export interface HumintFollowup {
+  question: string;
+  rationale: string;
+  priority: number;
+  related_gap_titles: string[];
+  suggested_channel?: string | null;
+}
+
+export interface HumintIirAnalysisResult {
+  mission_id: number;
+  document_id: number;
+  parsed_fields: HumintIirParsedFields;
+  key_insights: HumintInsight[];
+  contradictions: string[];
+  gaps: HumintGap[];
+  followups: HumintFollowup[];
+  evidence_document_ids: number[];
+  model_name?: string | null;
+  run_id?: number | null;
+}
+
 export interface MissionSourceDocument {
   id: string;
   mission_id: number;
@@ -458,6 +508,16 @@ export async function fetchMissionSourceDocuments(id: number): Promise<MissionSo
   return request({ path: `/missions/${id}/mission-documents` });
 }
 
+export async function analyzeHumintIir(
+  missionId: number,
+  documentId: number,
+): Promise<HumintIirAnalysisResult> {
+  return request({
+    path: `/missions/${missionId}/humint/documents/${documentId}/analyze`,
+    method: "POST",
+  });
+}
+
 export async function createDocument(
   missionId: number,
   payload: { title?: string; content: string },
@@ -471,6 +531,10 @@ export async function createDocument(
 
 export async function deleteDocument(id: number): Promise<void> {
   await request({ path: `/documents/${id}`, method: "DELETE" });
+}
+
+export async function deleteMissionSourceDocument(missionId: number, documentId: string): Promise<void> {
+  await request({ path: `/missions/${missionId}/mission-documents/${documentId}`, method: "DELETE" });
 }
 
 export async function moveDocumentToMission(

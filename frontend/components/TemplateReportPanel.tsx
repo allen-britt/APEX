@@ -248,14 +248,8 @@ export default function TemplateReportPanel({
 }
 
 function ReportPreview({ report }: { report: TemplateReportResponse }) {
-  const htmlContent = (() => {
-    if (typeof report.html === "string" && report.html.trim()) {
-      return report.html;
-    }
-    const legacyContent = (report as unknown as { content?: { html?: string } }).content;
-    const legacyHtml = typeof legacyContent?.html === "string" ? legacyContent.html : null;
-    return legacyHtml && legacyHtml.trim() ? legacyHtml : null;
-  })();
+  const htmlContent = typeof report.html === "string" && report.html.trim() ? report.html : null;
+  const markdownContent = typeof report.markdown === "string" && report.markdown.trim() ? report.markdown : null;
 
   return (
     <div className="space-y-3">
@@ -271,10 +265,14 @@ function ReportPreview({ report }: { report: TemplateReportResponse }) {
             suppressHydrationWarning
           />
         </div>
+      ) : markdownContent ? (
+        <pre className="max-h-[300px] overflow-auto rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-[11px] leading-relaxed text-slate-100">
+          {markdownContent}
+        </pre>
       ) : (
         <pre className="max-h-[300px] overflow-auto rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-[11px] leading-relaxed text-slate-100">
           {JSON.stringify(
-            (report as unknown as { content?: unknown }).content ?? {
+            {
               html: report.html,
               markdown: report.markdown,
               sections: report.sections,

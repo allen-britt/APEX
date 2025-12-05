@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated, List, Optional
 
 import httpx
@@ -48,6 +49,13 @@ def _get_document_or_404(document_id: int, db: Session) -> models.Document:
     document = db.query(models.Document).filter(models.Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return document
+
+
+def _get_mission_document_or_404(document_id: str, db: Session) -> models.MissionDocument:
+    document = db.query(models.MissionDocument).filter(models.MissionDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission document not found")
     return document
 
 
@@ -160,6 +168,34 @@ def list_mission_documents(
         .order_by(models.MissionDocument.created_at.desc())
         .all()
     )
+
+
+@router.delete(
+    "/missions/{mission_id}/mission-documents/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_mission_document(
+    mission_id: int,
+    document_id: str,
+    db: Session = Depends(get_db),
+) -> Response:
+    mission = _get_mission_or_404(mission_id, db)
+    document = _get_mission_document_or_404(document_id, db)
+    if document.mission_id != mission.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission document not found")
+
+    original_path = document.original_path
+    db.delete(document)
+    db.commit()
+
+    if original_path:
+        try:
+            path = Path(original_path)
+            path.unlink(missing_ok=True)
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

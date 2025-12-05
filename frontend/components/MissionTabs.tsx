@@ -17,6 +17,7 @@ import TemplateReportPanel from "@/components/TemplateReportPanel";
 import TemplateReportGenerator from "@/components/TemplateReportGenerator";
 import EntitiesEventsView from "@/components/EntitiesEventsView";
 import MissionSourcesTab from "@/components/MissionSourcesTab";
+import HumintAnalysisPanel from "@/components/HumintAnalysisPanel";
 import { MissionProvider, useMission } from "@/context/MissionContext";
 
 import type {
@@ -140,6 +141,18 @@ function MissionTabsInner({ missionId, documents, runs, datasets, gapAnalysis }:
                 Manage manually entered documents used during analysis. Source ingestion is now handled in the
                 dedicated Sources tab.
               </p>
+              <div className="grid gap-6 lg:grid-cols-2">
+                <DocumentForm missionId={missionId} onCreated={() => undefined} />
+                <div className="card space-y-4">
+                  <div>
+                    <h4 className="text-lg font-semibold">Mission document library</h4>
+                    <p className="text-sm text-slate-400">
+                      HUMINT IIR Evaluation uses the documents added here.
+                    </p>
+                  </div>
+                  <DocumentList missionId={missionId} documents={documents} />
+                </div>
+              </div>
             </section>
 
             <section className="space-y-4">
@@ -314,6 +327,9 @@ function MissionTabsInner({ missionId, documents, runs, datasets, gapAnalysis }:
 
           <div className="rounded-3xl border border-slate-800/50 bg-[#04070f]/80 p-4 shadow-[0_35px_65px_rgba(2,4,11,0.75)] lg:p-6">
             <EntitiesEventsView missionId={missionId} />
+            <div className="mt-6">
+              <HumintAnalysisPanel missionId={missionId} documents={documents} />
+            </div>
           </div>
         </div>
       </div>

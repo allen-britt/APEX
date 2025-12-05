@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
@@ -14,6 +15,27 @@ from app.services.mission_context_service import MissionContextError, MissionCon
 from app.services.kg_snapshot_utils import summarize_kg_snapshot
 
 logger = logging.getLogger(__name__)
+
+_JSON_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_json_payload(raw_text: str) -> Optional[str]:
+    if not raw_text:
+        return None
+    stripped = raw_text.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("{"):
+        return stripped
+    match = _JSON_CODE_FENCE_RE.search(raw_text)
+    if match:
+        return match.group(1).strip()
+    first = raw_text.find("{")
+    last = raw_text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        candidate = raw_text[first : last + 1]
+        return candidate.strip()
+    return None
 
 DECISION_JSON_SCHEMA_SNIPPET = """
 You MUST respond with a single JSON object matching this TypeScript schema:
@@ -241,10 +263,15 @@ class DecisionDatasetService:
             logger.exception("Decision dataset LLM call failed for mission_id=%s", mission.id)
             return None
 
+        payload_text = _extract_json_payload(raw_response)
+        if not payload_text:
+            logger.warning("Decision dataset response did not contain JSON payload: %s", raw_response)
+            return None
+
         try:
-            data = json.loads(raw_response)
+            data = json.loads(payload_text)
         except json.JSONDecodeError:
-            logger.warning("Decision dataset response was not valid JSON: %s", raw_response)
+            logger.warning("Decision dataset response was not valid JSON after extraction: %s", payload_text)
             return None
 
         coas = data.get("courses_of_action")

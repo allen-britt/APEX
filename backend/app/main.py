@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,6 +8,7 @@ from app.api import (
     documents,
     graph,
     health,
+    humint,
     mission_datasets,
     missions,
     report,
@@ -19,11 +21,19 @@ from app.db.init_db import init_db
 
 app = FastAPI(title="Project APEX Backend")
 
-# Allow the Next.js frontend to talk to the API
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+
+def _parse_cors_origins() -> list[str]:
+    raw = os.getenv("BACKEND_CORS_ORIGINS")
+    if not raw:
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    entries = [origin.strip() for origin in raw.split(",")]
+    return [origin for origin in entries if origin]
+
+
+origins = _parse_cors_origins() or ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +56,7 @@ app.include_router(documents.router)
 app.include_router(mission_datasets.router)
 app.include_router(graph.router)
 app.include_router(analysis.router)
+app.include_router(humint.router)
 app.include_router(agent.router)
 app.include_router(report.router)
 app.include_router(settings.router)

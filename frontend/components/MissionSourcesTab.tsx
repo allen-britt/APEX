@@ -4,10 +4,12 @@ import { useMemo, useState } from "react";
 import useSWR from "swr";
 
 import {
+  deleteMissionSourceDocument,
   fetchMissionSourceDocuments,
   ingestMissionDocumentUrl,
   uploadMissionSourceFile,
   type Mission,
+  type MissionSourceDocument,
 } from "@/lib/api";
 import { formatIntLabel, listIntOptions } from "@/lib/policy";
 
@@ -67,12 +69,56 @@ const INGEST_STATUS_STYLES: Record<string, string> = {
   FAILED: "bg-rose-500/20 border border-rose-400 text-rose-100",
 };
 
+type MissionSourceRow = MissionSourceDocument & {
+  mission_document_id?: string | number | null;
+  mission_document?: { id?: string | number | null } | null;
+  document_id?: string | number | null;
+  document?: { id?: string | number | null } | null;
+};
+
+function resolveMissionSourceId(row: MissionSourceRow): string | null {
+  const candidates: Array<string | number | null | undefined> = [
+    row.mission_document_id,
+    row.mission_document?.id,
+    row.document_id,
+    row.document?.id,
+    row.id,
+  ];
+
+  for (const raw of candidates) {
+    if (raw == null) {
+      continue;
+    }
+
+    if (typeof raw === "number") {
+      if (Number.isFinite(raw)) {
+        return String(Math.trunc(raw));
+      }
+      continue;
+    }
+
+    const trimmed = String(raw).trim();
+    if (!trimmed || trimmed.toLowerCase() === "nan") {
+      continue;
+    }
+
+    const numericValue = Number(trimmed);
+    if (Number.isFinite(numericValue) && !Number.isNaN(numericValue)) {
+      return String(Math.trunc(numericValue));
+    }
+
+    return trimmed;
+  }
+
+  return null;
+}
+
 export default function MissionSourcesTab({ missionId, mission }: MissionSourcesTabProps) {
   const intOptions = useMemo(() => listIntOptions(), []);
   const { data, error, isLoading, mutate } = useSWR(["mission-sources", missionId], () =>
     fetchMissionSourceDocuments(missionId),
   );
-  const documents = data ?? [];
+  const documents: MissionSourceRow[] = (data ?? []) as MissionSourceRow[];
 
   const [file, setFile] = useState<File | null>(null);
   const [fileTitle, setFileTitle] = useState("");
@@ -87,6 +133,35 @@ export default function MissionSourcesTab({ missionId, mission }: MissionSources
   const [urlInts, setUrlInts] = useState<string[]>([]);
   const [urlError, setUrlError] = useState<string | null>(null);
   const [urlSubmitting, setUrlSubmitting] = useState(false);
+
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+
+  async function handleDeleteDocument(doc: MissionSourceRow) {
+    const documentId = resolveMissionSourceId(doc);
+    if (!documentId) {
+      console.error("Cannot delete mission document – unresolved ID", doc);
+      alert("Unable to determine document ID for deletion.");
+      return;
+    }
+
+    console.log("Deleting doc with ID:", documentId, doc);
+
+    const confirmed = window.confirm("Delete this source file? This cannot be undone.");
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingDocumentId(documentId);
+    try {
+      await deleteMissionSourceDocument(missionId, documentId);
+      await mutate();
+    } catch (err) {
+      console.error("Failed to delete mission document", err);
+      alert("Failed to delete document. Please try again.");
+    } finally {
+      setDeletingDocumentId(null);
+    }
+  }
 
   const namespaceReady = Boolean(mission.kg_namespace);
   const ingestedCount = documents.filter((doc) => doc.status === "INGESTED").length;
@@ -333,11 +408,16 @@ export default function MissionSourcesTab({ missionId, mission }: MissionSources
                   <th className="px-4 py-3 text-left">Ingest job</th>
                   <th className="px-4 py-3 text-left">KG impact</th>
                   <th className="px-4 py-3 text-left">Timestamp</th>
+                  <th className="px-4 py-3 text-left">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {documents.map((doc) => (
-                  <tr key={doc.id} className="border-t border-slate-800 text-slate-100">
+                {documents.map((doc, index) => {
+                  const resolvedId = resolveMissionSourceId(doc);
+                  const isDeleting = resolvedId ? deletingDocumentId === resolvedId : false;
+                  const rowKey = resolvedId ?? doc.id ?? doc.document_id ?? doc.document?.id ?? `row-${index}`;
+                  return (
+                    <tr key={rowKey} className="border-t border-slate-800 text-slate-100">
                     <td className="px-4 py-3">
                       <div className="font-semibold">
                         {doc.title || doc.original_path || `Doc ${doc.id}`}
@@ -394,8 +474,19 @@ export default function MissionSourcesTab({ missionId, mission }: MissionSources
                     <td className="px-4 py-3 text-slate-400">
                       {new Date(doc.created_at).toLocaleString()}
                     </td>
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        className="rounded border border-rose-500/60 px-3 py-1 text-xs font-semibold text-rose-200 transition hover:bg-rose-600/10 disabled:opacity-50"
+                        onClick={() => handleDeleteDocument(doc)}
+                        disabled={!resolvedId || isDeleting}
+                      >
+                        {isDeleting ? "Deleting…" : "Delete"}
+                      </button>
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

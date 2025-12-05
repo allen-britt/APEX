@@ -350,6 +350,7 @@ export default function TemplateReportGenerator({
         template_id: record.template_id,
         template_name: record.template_name,
         html: "",
+        markdown: "",
         sections: record.sections,
         metadata: {
           ...record.metadata,

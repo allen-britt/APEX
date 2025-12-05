@@ -103,9 +103,11 @@ LEO_CASE_SUMMARY_MARKDOWN = """# LEO CASE SUMMARY – {{ mission_name }}
 
 OSINT_POL_LEO_MARKDOWN = """# OSINT PATTERN OF LIFE – {{subject_display_name}}
 
+**Classification:** UNCLASSIFIED // TRAINING USE ONLY  
+**Authority:** [Simulation / Training]  
 **Case ID:** {{case_id}}  
 **Mission:** {{mission_title}}  
-**Authority:** {{authority_label}}  
+**Mission Authority Lane:** {{authority_label}}  
 **INT Lane:** OSINT – Open Source  
 **Prepared by:** {{analyst_name}}  
 **Date:** {{report_date}}
@@ -166,15 +168,19 @@ Narrative:
 
 ---
 
-## 8. Recommended Next Steps (OSINT / LEO-Safe)
+## 8. Recommended Next Steps (OSINT / LEO-safe)
+
+_Frame next steps as intelligence recommendations or referrals (e.g., "Coordinate with appropriate law-enforcement partners through established legal channels to..."). Do **not** direct arrests, traffic stops, weapon seizures, or other enforcement actions._
 
 {{recommended_next_steps}}
 """
 
 FULL_INTREP_MARKDOWN = """# INTELLIGENCE REPORT – {{mission_title}}
 
+**Classification:** UNCLASSIFIED // TRAINING USE ONLY  
+**Authority:** [Simulation / Training]  
 **Mission ID:** {{mission_id}}  
-**Authority:** {{authority_label}}  
+**Mission Authority Lane:** {{authority_label}}  
 **INT Lanes:** {{int_lanes}}  
 **Prepared by:** {{analyst_name}}  
 **Date:** {{report_date}}
@@ -209,6 +215,8 @@ FULL_INTREP_MARKDOWN = """# INTELLIGENCE REPORT – {{mission_title}}
 
 ## 5. Courses of Action (High-Level)
 
+_Offer analytic recommendations using coordination/referral phrasing (e.g., "Recommend that host-nation law enforcement consider…"). Avoid direct orders to arrest, seize, or conduct traffic stops._
+
 {{coas_high_level}}
 
 ---
@@ -226,6 +234,8 @@ FULL_INTREP_MARKDOWN = """# INTELLIGENCE REPORT – {{mission_title}}
 
 DELTA_UPDATE_MARKDOWN = """# DELTA UPDATE – {{mission_title}}
 
+**Classification:** UNCLASSIFIED // TRAINING USE ONLY  
+**Authority:** [Simulation / Training]  
 **Case ID:** {{case_id}}  
 **Compared to:** {{prior_report_timestamp}}  
 **Generated:** {{report_date}}  
@@ -257,6 +267,8 @@ DELTA_UPDATE_MARKDOWN = """# DELTA UPDATE – {{mission_title}}
 ---
 
 ## 5. Updated Recommended Actions
+
+_Express actions as intelligence referrals/coordination steps (e.g., "Refer findings to competent authorities...") and do not direct arrests, traffic stops, or seizures._
 
 {{updated_actions}}
 """

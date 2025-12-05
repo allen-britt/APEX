@@ -748,6 +748,7 @@ class TemplateReportService:
         context: Dict[str, Any],
         decision_dataset: DecisionDataset | None,
     ) -> Dict[str, Any]:
+        agent_run = context.get("latest_agent_run") or context.get("agent_run")
         ctx = self._build_prompt_context(mission=mission, agent_run=None, context=context)
         if decision_dataset:
             ctx["decisions"] = (
@@ -786,7 +787,7 @@ class TemplateReportService:
         markdown_output = self._invoke_markdown_llm(system_prompt, user_prompt, template_id=template.id)
         if not markdown_output:
             raise TemplateGenerationError("LLM returned empty output", status_code=502)
-        markdown_output = self._strip_placeholders(markdown_output)
+        markdown_output = _strip_placeholders(markdown_output)
         markdown_output = _sanitize_report_markdown(markdown_output)
         html_output = self._render_markdown(markdown_output)
         metadata = self._base_metadata(

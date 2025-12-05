@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from app.authorities import AuthorityType
+from app.schemas.humint import (
+    HumintFollowup,
+    HumintGap,
+    HumintIirAnalysisResult,
+    HumintIirParsedFields,
+    HumintInsight,
+)
 
 
 class ORMBase(BaseModel):
@@ -138,7 +146,7 @@ class EventBase(ORMBase):
     summary: Optional[str] = None
     timestamp: Optional[datetime] = None
     location: Optional[str] = None
-    involved_entity_ids: List[Union[int, str]] = Field(default_factory=list)
+    involved_entity_ids: List[str] = Field(default_factory=list)
 
 
 class EventCreate(EventBase):
@@ -149,6 +157,25 @@ class EventResponse(EventBase):
     id: int
     mission_id: int
     created_at: datetime
+
+    @field_validator("involved_entity_ids", mode="before")
+    @classmethod
+    def _coerce_involved_entity_ids(cls, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                return [part.strip() for part in raw.split(",") if part.strip()]
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return [str(value)]
 
 
 class GapFinding(BaseModel):
