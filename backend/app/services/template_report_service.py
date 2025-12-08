@@ -305,6 +305,9 @@ class TemplateReportService:
             logger.exception("Failed to build mission context for mission_id=%s", mission_id)
             raise TemplateGenerationError("Unable to build mission context", status_code=500) from exc
 
+        analysis_dataset = self._build_analysis_dataset(mission=mission, context=context)
+        context["analysis_dataset"] = analysis_dataset
+
         kg_summary = summarize_kg_snapshot(context.get("kg_snapshot"))
         context["kg_snapshot_summary"] = kg_summary
         logger.info(
@@ -499,15 +502,54 @@ class TemplateReportService:
     ) -> Dict[str, Any]:
         # Milestone 1: agent_run content is intentionally excluded from prompt context to keep reports
         # grounded only in structured mission data. agent_run remains available solely for metadata/UI.
+        dataset = context.get("analysis_dataset") or {}
+        documents = dataset.get("included_documents") or dataset.get("documents") or context.get("documents")
+        source_documents = dataset.get("source_documents") or context.get("source_documents")
         return {
-            "mission": self._serialize_mission(mission),
-            "documents": context.get("documents"),
-            "entities": context.get("entities"),
-            "events": context.get("events"),
-            "datasets": context.get("datasets"),
-            "gap_analysis": context.get("gap_analysis"),
-            "kg_snapshot_summary": context.get("kg_snapshot_summary"),
+            "mission": dataset.get("mission") or self._serialize_mission(mission),
+            "documents": documents,
+            "source_documents": source_documents,
+            "entities": dataset.get("entities") or context.get("entities"),
+            "events": dataset.get("events") or context.get("events"),
+            "datasets": dataset.get("datasets") or context.get("datasets"),
+            "gap_analysis": dataset.get("gap_analysis") or context.get("gap_analysis"),
+            "kg_snapshot_summary": dataset.get("kg_snapshot_summary") or context.get("kg_snapshot_summary"),
         }
+
+    def _build_analysis_dataset(
+        self,
+        *,
+        mission: models.Mission,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        documents = context.get("documents") or []
+        included_documents = [doc for doc in documents if doc.get("include_in_analysis")]
+
+        source_documents = context.get("source_documents") or []
+        included_sources: list[Dict[str, Any]] = []
+        for source in source_documents:
+            if not isinstance(source, dict):
+                continue
+            status = (source.get("status") or "").upper()
+            ingest_status = (source.get("ingest_status") or "").upper()
+            if status == "INGESTED" or ingest_status == "SUCCESS" or source.get("text_preview"):
+                included_sources.append(source)
+
+        dataset = {
+            "mission": self._serialize_mission(mission),
+            "documents": documents,
+            "included_documents": included_documents,
+            "source_documents": included_sources,
+            "entities": context.get("entities") or [],
+            "events": context.get("events") or [],
+            "datasets": context.get("datasets") or [],
+            "gap_analysis": context.get("gap_analysis"),
+            "kg_snapshot": context.get("kg_snapshot"),
+            "kg_snapshot_summary": context.get("kg_snapshot_summary"),
+            "latest_agent_run": context.get("latest_agent_run"),
+        }
+
+        return dataset
 
     def _base_metadata(
         self,

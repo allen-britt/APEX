@@ -49,6 +49,7 @@ class MissionContextService:
         }
 
         documents = self._serialize_documents(mission.id)
+        source_documents = self._serialize_mission_source_documents(mission.id)
         entities = self._serialize_entities(mission.id)
         events = self._serialize_events(mission.id)
         datasets = self._serialize_datasets(mission.id)
@@ -60,6 +61,7 @@ class MissionContextService:
         context: Dict[str, Any] = {
             "mission": mission_block,
             "documents": documents,
+            "source_documents": source_documents,
             "entities": entities,
             "events": events,
             "datasets": datasets,
@@ -116,6 +118,41 @@ class MissionContextService:
             }
             for doc in documents
         ]
+
+    def _serialize_mission_source_documents(self, mission_id: int) -> List[Dict[str, Any]]:
+        mission_docs = (
+            self.db.query(models.MissionDocument)
+            .filter(models.MissionDocument.mission_id == mission_id)
+            .order_by(models.MissionDocument.created_at.asc())
+            .all()
+        )
+
+        serialized: List[Dict[str, Any]] = []
+        for doc in mission_docs:
+            job = getattr(doc, "ingest_job", None)
+            preview: str | None = None
+            if job and isinstance(job.payload_text, str):
+                preview = job.payload_text[:2000]
+
+            serialized.append(
+                {
+                    "id": doc.id,
+                    "title": doc.title,
+                    "source_type": doc.source_type,
+                    "primary_int": doc.primary_int,
+                    "int_types": list(doc.int_types or []),
+                    "status": doc.status,
+                    "aggregator_doc_id": doc.aggregator_doc_id,
+                    "ingest_status": doc.ingest_status,
+                    "ingest_error": doc.ingest_error,
+                    "kg_nodes_delta": doc.kg_nodes_delta,
+                    "kg_edges_delta": doc.kg_edges_delta,
+                    "created_at": _isoformat_or_none(doc.created_at),
+                    "text_preview": preview,
+                }
+            )
+
+        return serialized
 
     def _fetch_kg_snapshot(self, mission: models.Mission) -> Dict[str, Any] | None:
         if not mission.kg_namespace:
