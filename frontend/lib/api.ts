@@ -99,6 +99,32 @@ export interface Document {
   created_at: string;
 }
 
+export type AnalysisProfile = "humint" | "generic";
+
+export interface FollowUpQuestion {
+  target: string;
+  question: string;
+}
+
+export interface GenericAnalysisRequest {
+  mission_id: number;
+  document_ids: number[];
+  profile?: AnalysisProfile;
+}
+
+export interface GenericAnalysisResult {
+  mission_id: number;
+  document_ids: number[];
+  profile: string;
+  summary: string;
+  key_entities: string[];
+  key_events: string[];
+  contradictions: string[];
+  gaps: string[];
+  follow_up_questions: FollowUpQuestion[];
+  decision_note: string;
+}
+
 export interface HumintIirParsedFields {
   report_number?: string | null;
   source_id?: string | null;
@@ -556,6 +582,16 @@ export async function setDocumentIncludeInAnalysis(
     path: `/documents/${documentId}`,
     method: "PATCH",
     body: JSON.stringify({ include_in_analysis: include }),
+  });
+}
+
+export async function runGenericAnalysis(
+  payload: GenericAnalysisRequest,
+): Promise<GenericAnalysisResult> {
+  return request({
+    path: "/analysis/run",
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 

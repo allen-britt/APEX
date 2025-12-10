@@ -75,7 +75,8 @@ class Mission(Base):
 
     @mission_authority.setter
     def mission_authority(self, value: str) -> None:
-        self.primary_authority = normalize_authority(value).value
+        normalized = normalize_authority(value, default=AuthorityType.LEO)
+        self.primary_authority = (normalized or AuthorityType.LEO).value
 
 
 class Document(Base):
@@ -265,6 +266,9 @@ class AgentRun(Base):
     next_steps = Column(Text, nullable=True)
     guardrail_status = Column(String, nullable=False, default="ok")
     guardrail_issues = Column(JSON, default=list)
+    raw_facts = Column(JSON, nullable=True)
+    gaps = Column(JSON, nullable=True)
+    delta_summary = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),

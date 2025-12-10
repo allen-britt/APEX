@@ -17,11 +17,20 @@ class TemplateMetadata(Protocol):
 def filter_templates_for_mission(
     *, mission: models.Mission, templates: Iterable[TemplateMetadata]
 ) -> List[TemplateMetadata]:
-    authority = (mission.mission_authority or "LEO").strip().upper()
+    authority_value = (
+        (mission.mission_authority or getattr(mission, "original_authority", None) or "")
+        .strip()
+        .upper()
+    )
+    authority = authority_value or None
     mission_ints = {value.strip().upper() for value in (mission.int_types or []) if value}
 
     def _is_authority_allowed(tpl: TemplateMetadata) -> bool:
-        return not tpl.allowed_authorities or authority in tpl.allowed_authorities
+        if not tpl.allowed_authorities:
+            return True
+        if authority is None:
+            return False
+        return authority in tpl.allowed_authorities
 
     def _is_int_allowed(tpl: TemplateMetadata) -> bool:
         if not mission_ints:

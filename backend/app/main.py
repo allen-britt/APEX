@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import (
     agent,
     analysis,
+    analysis_generic,
     documents,
     graph,
     health,
@@ -56,6 +57,7 @@ app.include_router(documents.router)
 app.include_router(mission_datasets.router)
 app.include_router(graph.router)
 app.include_router(analysis.router)
+app.include_router(analysis_generic.router)
 app.include_router(humint.router)
 app.include_router(agent.router)
 app.include_router(report.router)

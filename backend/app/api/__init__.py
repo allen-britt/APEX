@@ -3,6 +3,7 @@
 from . import (
     agent,
     analysis,
+    analysis_generic,
     documents,
     graph,
     health,
@@ -17,6 +18,7 @@ from . import (
 __all__ = [
     "agent",
     "analysis",
+    "analysis_generic",
     "documents",
     "graph",
     "health",

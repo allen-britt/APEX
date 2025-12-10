@@ -18,6 +18,7 @@ import TemplateReportGenerator from "@/components/TemplateReportGenerator";
 import EntitiesEventsView from "@/components/EntitiesEventsView";
 import MissionSourcesTab from "@/components/MissionSourcesTab";
 import HumintAnalysisPanel from "@/components/HumintAnalysisPanel";
+import AIAnalysisPanel from "@/components/AIAnalysisPanel";
 import { MissionProvider, useMission } from "@/context/MissionContext";
 
 import type {
@@ -325,11 +326,10 @@ function MissionTabsInner({ missionId, documents, runs, datasets, gapAnalysis }:
             </section>
           </div>
 
-          <div className="rounded-3xl border border-slate-800/50 bg-[#04070f]/80 p-4 shadow-[0_35px_65px_rgba(2,4,11,0.75)] lg:p-6">
+          <div className="rounded-3xl border border-slate-800/50 bg-[#04070f]/80 p-4 shadow-[0_35px_65px_rgba(2,4,11,0.75)] lg:p-6 space-y-6">
             <EntitiesEventsView missionId={missionId} />
-            <div className="mt-6">
-              <HumintAnalysisPanel missionId={missionId} documents={documents} />
-            </div>
+            <AIAnalysisPanel missionId={missionId} documents={documents} />
+            <HumintAnalysisPanel missionId={missionId} documents={documents} />
           </div>
         </div>
       </div>

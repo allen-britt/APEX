@@ -244,7 +244,7 @@ async def generate_templated_report(
 
     gap_data = mission.gap_analysis if isinstance(mission.gap_analysis, dict) else None
     if not gap_data:
-        gap_result = gap_service.run_gap_analysis(mission_id)
+        gap_result = await gap_service.run_gap_analysis(mission_id)
         gap_data = gap_result.model_dump(mode="json")
         mission.gap_analysis = gap_data
         db.add(mission)

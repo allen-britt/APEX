@@ -22,7 +22,7 @@ def _get_mission_or_404(mission_id: int, db: Session) -> models.Mission:
 
 
 @router.post("", response_model=schemas.GapAnalysisResult)
-def run_gap_analysis(
+async def run_gap_analysis(
     mission_id: int,
     db: Session = Depends(get_db),
 ) -> schemas.GapAnalysisResult:
@@ -30,7 +30,7 @@ def run_gap_analysis(
     service = GapAnalysisService(db)
     try:
         logger.info("gap_analysis.request", extra={"mission_id": mission_id})
-        result = service.run_gap_analysis(mission_id)
+        result = await service.run_gap_analysis(mission_id)
         logger.info(
             "gap_analysis.success",
             extra={"mission_id": mission_id, "gap_count": len(result.gaps)},

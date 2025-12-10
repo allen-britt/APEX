@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.services.coverage_service import CoverageService
-from app.services.llm_client import LLMClient, LlmError
+from app.services.llm_client import LLMCallException, LLMRole, call_llm_with_role
 from app.services.mission_context_service import MissionContextService
 from app.services.kg_snapshot_utils import summarize_kg_snapshot
+from app.services.policy_context import build_policy_prompt
 from app.services.prompt_builder import build_global_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -39,15 +40,14 @@ class GapAnalysisService:
         self.db = db
         self._context_service = MissionContextService(db)
         self._coverage_service = CoverageService()
-        self._llm = LLMClient()
 
-    def run_gap_analysis(self, mission_id: int) -> schemas.GapAnalysisResult:
+    async def run_gap_analysis(self, mission_id: int) -> schemas.GapAnalysisResult:
         mission = self._get_mission_or_raise(mission_id)
         context = self._context_service.build_context(mission_id)
         coverage_summary = self._coverage_service.build_coverage_map(context)
 
         try:
-            llm_payload = self._invoke_llm(
+            llm_payload = await self._invoke_llm(
                 context=context,
                 coverage=coverage_summary,
             )
@@ -58,7 +58,7 @@ class GapAnalysisService:
         payload = self._compose_payload(mission, coverage_summary, llm_payload)
         return schemas.GapAnalysisResult(**payload)
 
-    def _invoke_llm(
+    async def _invoke_llm(
         self,
         *,
         context: Dict[str, Any],
@@ -90,14 +90,16 @@ class GapAnalysisService:
             " allowed_under_mission_authority, rationale, related_gap_ids."
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        policy_block = self._build_policy_block(prompt_context)
 
         try:
-            raw = self._llm.chat(messages)
-        except LlmError as exc:
+            raw = await call_llm_with_role(
+                prompt=user_prompt,
+                system=system_prompt,
+                policy_block=policy_block,
+                role=LLMRole.ANALYSIS_PRIMARY,
+            )
+        except LLMCallException as exc:
             raise GapAnalysisError("LLM call failed") from exc
 
         try:
@@ -108,6 +110,19 @@ class GapAnalysisService:
         if not isinstance(data, dict):
             raise GapAnalysisError("LLM response must be a JSON object")
         return data
+
+    def _build_policy_block(self, prompt_context: Dict[str, Any]) -> str | None:
+        mission_block = prompt_context.get("mission") or {}
+        authority = mission_block.get("mission_authority") or prompt_context.get("authority")
+        int_types = (
+            prompt_context.get("int_types")
+            or mission_block.get("int_types")
+            or []
+        )
+        history_lines = mission_block.get("authority_history_lines")
+        if not authority and not int_types:
+            return None
+        return build_policy_prompt(authority, int_types, authority_history=history_lines)
 
     def _compose_payload(
         self,

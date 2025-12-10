@@ -26,6 +26,7 @@ def init_db() -> None:
             raise
 
     _ensure_original_authority_column()
+    _ensure_agent_run_analysis_columns()
 
 
 def _ensure_original_authority_column() -> None:
@@ -46,3 +47,22 @@ def _ensure_original_authority_column() -> None:
                 "UPDATE missions SET original_authority = mission_authority WHERE original_authority IS NULL OR original_authority = ''"
             )
         )
+
+
+def _ensure_agent_run_analysis_columns() -> None:
+    inspector = inspect(engine)
+    columns = {col["name"] for col in inspector.get_columns("agent_runs")}
+    required = {
+        "raw_facts": "ALTER TABLE agent_runs ADD COLUMN raw_facts JSON",
+        "gaps": "ALTER TABLE agent_runs ADD COLUMN gaps JSON",
+        "delta_summary": "ALTER TABLE agent_runs ADD COLUMN delta_summary TEXT",
+    }
+
+    missing = [name for name in required if name not in columns]
+    if not missing:
+        return
+
+    logger.info("Adding missing agent_runs analysis columns: %s", ", ".join(missing))
+    with engine.begin() as conn:
+        for name in missing:
+            conn.execute(text(required[name]))

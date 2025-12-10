@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -10,9 +11,10 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.models.decision_dataset import DecisionDataset
-from app.services.llm_client import LLMClient, LlmError
+from app.services.llm_client import LLMCallException, LLMRole, call_llm_with_role
 from app.services.mission_context_service import MissionContextError, MissionContextService
 from app.services.kg_snapshot_utils import summarize_kg_snapshot
+from app.services.policy_context import build_policy_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,9 @@ def _serialize_run(run: models.AgentRun | None) -> Dict[str, Any] | None:
         "next_steps": run.next_steps,
         "guardrail_status": run.guardrail_status,
         "guardrail_issues": list(run.guardrail_issues or []),
+        "raw_facts": run.raw_facts,
+        "gaps": run.gaps,
+        "delta_summary": run.delta_summary,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
     }
@@ -160,11 +165,9 @@ class DecisionDatasetService:
         db: Session,
         *,
         context_service: MissionContextService | None = None,
-        llm_client: LLMClient | None = None,
     ) -> None:
         self.db = db
         self._context_service = context_service or MissionContextService(db)
-        self._llm = llm_client or LLMClient()
 
     def build_decision_dataset(
         self,
@@ -252,14 +255,15 @@ class DecisionDatasetService:
             max_coas=max_coas_per_decision,
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        policy_block = self._build_policy_block(mission_context, mission)
 
         try:
-            raw_response = self._llm.chat(messages)
-        except LlmError:
+            raw_response = self._invoke_decision_llm(
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                policy_block=policy_block,
+            )
+        except LLMCallException:
             logger.exception("Decision dataset LLM call failed for mission_id=%s", mission.id)
             return None
 
@@ -289,4 +293,32 @@ class DecisionDatasetService:
         except ValidationError:
             logger.exception("Decision dataset response failed validation")
             return None
+
+    def _build_policy_block(
+        self,
+        mission_context: Dict[str, Any],
+        mission: models.Mission,
+    ) -> str | None:
+        mission_block = mission_context.get("mission") or {}
+        authority = mission_block.get("mission_authority") or mission.mission_authority
+        int_types = mission_block.get("int_types") or mission.int_types
+        history_lines = mission_block.get("authority_history_lines")
+        return build_policy_prompt(authority, int_types or [], authority_history=history_lines)
+
+    def _invoke_decision_llm(
+        self,
+        *,
+        user_prompt: str,
+        system_prompt: str,
+        policy_block: str | None,
+    ) -> str:
+        async def _call() -> str:
+            return await call_llm_with_role(
+                prompt=user_prompt,
+                system=system_prompt,
+                policy_block=policy_block,
+                role=LLMRole.ANALYSIS_PRIMARY,
+            )
+
+        return asyncio.run(_call())
 

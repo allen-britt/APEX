@@ -18,6 +18,7 @@ from app.services.semantic_profiler import (
     SemanticProfiler,
     SemanticProfilerError,
 )
+from app.services.policy_context import build_policy_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ def build_semantic_profile(
     db: Session = Depends(get_db),
     profiler: SemanticProfiler = Depends(get_semantic_profiler),
 ) -> schemas.MissionDatasetRead:
-    _get_mission_or_404(mission_id, db)
+    mission = _get_mission_or_404(mission_id, db)
     dataset = _get_dataset_or_404(mission_id, dataset_id, db)
 
     if not dataset.profile:
@@ -124,7 +125,8 @@ def build_semantic_profile(
         )
 
     try:
-        semantic_profile = profiler.generate(dataset)
+        policy_block = build_policy_prompt(mission.mission_authority, mission.int_types)
+        semantic_profile = profiler.generate(dataset, policy_block=policy_block)
     except SemanticProfilerError as exc:
         logger.exception("Failed to generate semantic profile for dataset %s", dataset_id)
         raise HTTPException(

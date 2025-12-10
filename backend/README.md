@@ -75,6 +75,25 @@ The agent pipeline reads its LLM settings from environment variables (see `app/c
 
 Set `APEX_LLM_DEMO_MODE=false` (and the other variables as needed) before running the API to enable real LLM calls.
 
+### LLM roles & environment configuration
+
+Project APEX uses three logical LLM roles:
+
+- **`analysis_primary`** – high-rigor reasoning for HUMINT/IIR parsing, mission synthesis, decision datasets.
+- **`utility_fast`** – lightweight helpers (health checks, guards, semantic transforms) that favor speed/cost.
+- **`narrative_polish`** – optional pass that turns structured analysis into polished narrative reports; falls back to `analysis_primary` when unset.
+
+Each role can be remapped via environment variables (all default to local Ollama-friendly models):
+
+```
+APEX_LLM_ANALYSIS_PRIMARY_MODEL=llama3:8b
+APEX_LLM_UTILITY_FAST_MODEL=mistral:instruct
+APEX_LLM_NARRATIVE_POLISH_MODEL=llama3:8b
+APEX_LLM_BASE_URL=http://localhost:11434
+```
+
+Set these before launching the backend to point at a different provider. Temperatures and other per-role params live in `app/services/llm_client.py`.
+
 ## Next steps
 
 - Introduce Alembic for managed migrations once schema becomes more complex.

@@ -10,6 +10,7 @@ from app.authorities import (
     authority_prompt_block,
     get_descriptor,
     normalize_authority,
+    try_get_descriptor,
 )
 from app.config.int_registry import IntMetadata, get_int_registry
 
@@ -63,9 +64,17 @@ def build_policy_prompt(
       - Selected INT sensitivity guidance
       - Compliance reminder that hard boundaries override creativity
     """
-    descriptor = get_descriptor(authority)
-    normalized_authority = descriptor.value
-    authority_block = authority_prompt_block(normalized_authority)
+    descriptor = try_get_descriptor(authority)
+    if descriptor:
+        authority_block = authority_prompt_block(descriptor.value)
+        lane_label = descriptor.label
+    else:
+        lane_label = "the current mission lane"
+        authority_block = (
+            "Authority Lane: Unspecified or Missing\n"
+            "Context: Mission metadata did not specify an authority lane. Keep analysis within documented mission scope and do not assume criminal, military, or intelligence authorities.\n"
+            "Prohibitions: Decline any recommendation that would require unverified legal powers or law-enforcement actions."
+        )
 
     normalized_ints = _normalize_int_codes(int_codes)
     int_lines = _format_int_sensitivity_lines(normalized_ints)
@@ -79,7 +88,7 @@ def build_policy_prompt(
 
     closing = (
         "Compliance Reminder: Hard boundaries override creativity. If any request conflicts with "
-        f"the {descriptor.label} lane or the approved INT set "
+        f"{lane_label} guidance or the approved INT set "
         f"({', '.join(normalized_ints) if normalized_ints else 'OSINT defaults'}), "
         "the assistant must refuse and issue a policy warning. When authority pivots occur, the assistant must "
         "respect the current authority AND explicitly honor any risks or conditions documented in the pivot history."
@@ -93,7 +102,9 @@ def find_disallowed_ints(
     mission_ints: Sequence[str] | None,
 ) -> List[str]:
     """Return human-readable issues for INT selections not permitted under the authority."""
-    descriptor: AuthorityDescriptor = get_descriptor(authority)
+    descriptor = try_get_descriptor(authority)
+    if descriptor is None:
+        return []
     allowed = {code.upper() for code in descriptor.allowed_int_types} if descriptor.allowed_int_types else set()
     if not allowed or not mission_ints:
         return []
@@ -118,7 +129,9 @@ def guardrail_keyword_hits(
     if not text:
         return []
 
-    descriptor = get_descriptor(authority)
+    descriptor = try_get_descriptor(authority)
+    if descriptor is None:
+        return ["Note: Some requested content exceeded the mission's specified authority lane. The response has been limited accordingly."]
     lowered = text.lower()
     hits: List[str] = []
 

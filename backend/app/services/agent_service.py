@@ -10,6 +10,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models
+from app.authorities import AuthorityType, get_descriptor
 from app.services import (
     authority_history,
     extraction_service,
@@ -46,8 +47,7 @@ You are performing cross-document and cross-source analysis.
 - Respect authority and INT constraints.
 """.strip()
 
-ANALYSIS_GUARDRAIL_RULES = """
-You are an intelligence analyst supporting a law-enforcement investigation.
+ANALYSIS_GUARDRAIL_RULES_BODY = """
 You will receive structured JSON describing the mission authority, entities, events, and knowledge-graph highlights.
 You MUST:
 - Use ONLY the information in that JSON.
@@ -56,20 +56,81 @@ You MUST:
 - If information is missing, explicitly note the gap with 'None available'.
 - Never mention JSON, 'context', 'mission text', or 'Agent Run Advisory' in your response.
 - Do not reference variable names (e.g., evidence.incidents[0], Event ID 3) or describe what inputs you received.
-- Write as a final, human analyst product for case officers—no meta narration.
+- Write as a final, human analyst product—no meta narration.
 """.strip()
 
-ESTIMATE_TASK_INSTRUCTIONS = f"""{ANALYSIS_GUARDRAIL_RULES}
+ESTIMATE_TASK_BODY = """
 Produce a 2-3 paragraph operational estimate covering situation, threat/adversary posture, friendly considerations, and risk. Ground every statement in available documents or the knowledge graph and call out limitations if coverage is sparse.
 """.strip()
 
-SUMMARY_TASK_INSTRUCTIONS = f"""{ANALYSIS_GUARDRAIL_RULES}
+SUMMARY_TASK_BODY = """
 Provide a concise narrative (<=120 words) focused on intent, capability, and risk.
 """.strip()
 
-NEXT_STEPS_TASK_INSTRUCTIONS = f"""{ANALYSIS_GUARDRAIL_RULES}
+NEXT_STEPS_TASK_BODY = """
 Recommend 3-7 concrete follow-up actions (collection, coordination, verification, tasking). Ensure each action is legal for the current authority and INT set, and tie it to identified gaps.
 """.strip()
+
+
+def build_authority_role_text(authority_value: str | AuthorityType | None) -> str:
+    """Return an authority-aware role description for the analyst prompts."""
+
+    descriptor = get_descriptor(authority_value)
+    authority = descriptor.value
+
+    if authority == AuthorityType.TITLE_50_IC:
+        return (
+            "You are an intelligence analyst operating under Title 50 foreign intelligence authorities. "
+            "Focus on HUMINT and all-source analysis, collection guidance, and decision support—not criminal prosecution. "
+            "Do NOT recommend arrests, search warrants, indictments, or other domestic law-enforcement actions."
+        )
+    if authority == AuthorityType.LEO:
+        return (
+            "You are an intelligence analyst supporting a law-enforcement investigative mission. "
+            "Provide evidence-focused insights that inform investigators, but do not direct tactical teams or promise prosecutorial outcomes."
+        )
+    return (
+        f"You are an intelligence analyst supporting the {descriptor.label} authority lane. "
+        "Align all findings and recommendations with that mission scope and legal framework."
+    )
+
+
+def build_analysis_guardrail_rules(authority_value: str | AuthorityType | None) -> str:
+    role_text = build_authority_role_text(authority_value)
+    descriptor = get_descriptor(authority_value)
+    extra_lines: list[str] = []
+
+    if descriptor.value == AuthorityType.TITLE_50_IC:
+        extra_lines.append(
+            "- Never reference domestic criminal procedure (probable cause, warrants, indictments) or request arrests. Keep recommendations framed as collection, analysis, or interagency coordination."
+        )
+    elif descriptor.value == AuthorityType.LEO:
+        extra_lines.append(
+            "- Discuss investigative steps, legal process, and coordination needs, but always distinguish intelligence recommendations from operational orders."
+        )
+    else:
+        extra_lines.append(
+            "- Keep every statement within the mission's stated authority and INT set, noting when additional authorities or partners would be required."
+        )
+
+    extra_text = "\n".join(extra_lines)
+    body = ANALYSIS_GUARDRAIL_RULES_BODY if not extra_text else f"{ANALYSIS_GUARDRAIL_RULES_BODY}\n{extra_text}"
+    return f"{role_text}\n{body}".strip()
+
+
+def build_estimate_task_instructions(authority_value: str | AuthorityType | None) -> str:
+    guardrails = build_analysis_guardrail_rules(authority_value)
+    return f"{guardrails}\n{ESTIMATE_TASK_BODY}".strip()
+
+
+def build_summary_task_instructions(authority_value: str | AuthorityType | None) -> str:
+    guardrails = build_analysis_guardrail_rules(authority_value)
+    return f"{guardrails}\n{SUMMARY_TASK_BODY}".strip()
+
+
+def build_next_steps_task_instructions(authority_value: str | AuthorityType | None) -> str:
+    guardrails = build_analysis_guardrail_rules(authority_value)
+    return f"{guardrails}\n{NEXT_STEPS_TASK_BODY}".strip()
 
 SELF_VERIFY_TASK_INSTRUCTIONS = """
 You are reviewing the analytic output for internal consistency and quality.
@@ -152,6 +213,8 @@ def _build_mission_context(mission: models.Mission, documents: List[models.Docum
 def _build_prompt_context(
     mission: models.Mission,
     history_payload: Dict[str, Any],
+    *,
+    kg_warnings: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     context: Dict[str, Any] = {
         "authority": mission.mission_authority,
@@ -248,6 +311,13 @@ def _sanitize_analysis_text(text: str | None, mission: models.Mission, source_co
                 mission.kg_namespace,
                 exc_info=True,
             )
+            if kg_warnings is not None:
+                kg_warnings.append(
+                    {
+                        "type": "kg_unavailable",
+                        "message": f"Knowledge graph summary unavailable for namespace={mission.kg_namespace}",
+                    }
+                )
 
     if isinstance(kg_summary, dict):
         context["kg_summary"] = kg_summary
@@ -268,16 +338,25 @@ def _build_cross_doc_system_prompt(prompt_context: Dict[str, Any]) -> str:
     return build_global_system_prompt(prompt_context, CROSS_DOC_TASK_INSTRUCTIONS)
 
 
-def _build_estimate_system_prompt(prompt_context: Dict[str, Any]) -> str:
-    return build_global_system_prompt(prompt_context, ESTIMATE_TASK_INSTRUCTIONS)
+def _build_estimate_system_prompt(
+    prompt_context: Dict[str, Any], authority_value: str | AuthorityType | None
+) -> str:
+    instructions = build_estimate_task_instructions(authority_value)
+    return build_global_system_prompt(prompt_context, instructions)
 
 
-def _build_summary_system_prompt(prompt_context: Dict[str, Any]) -> str:
-    return build_global_system_prompt(prompt_context, SUMMARY_TASK_INSTRUCTIONS)
+def _build_summary_system_prompt(
+    prompt_context: Dict[str, Any], authority_value: str | AuthorityType | None
+) -> str:
+    instructions = build_summary_task_instructions(authority_value)
+    return build_global_system_prompt(prompt_context, instructions)
 
 
-def _build_next_steps_system_prompt(prompt_context: Dict[str, Any]) -> str:
-    return build_global_system_prompt(prompt_context, NEXT_STEPS_TASK_INSTRUCTIONS)
+def _build_next_steps_system_prompt(
+    prompt_context: Dict[str, Any], authority_value: str | AuthorityType | None
+) -> str:
+    instructions = build_next_steps_task_instructions(authority_value)
+    return build_global_system_prompt(prompt_context, instructions)
 
 
 def _build_self_verify_system_prompt(prompt_context: Dict[str, Any]) -> str:
@@ -379,13 +458,15 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
     )
 
     history_payload = authority_history.build_authority_history_payload(mission)
-    prompt_context = _build_prompt_context(mission, history_payload)
+    kg_warning_issues: List[Dict[str, str]] = []
+    prompt_context = _build_prompt_context(mission, history_payload, kg_warnings=kg_warning_issues)
     facts_system_prompt = _build_facts_system_prompt(prompt_context)
     gaps_system_prompt = _build_gaps_system_prompt(prompt_context)
     cross_doc_system_prompt = _build_cross_doc_system_prompt(prompt_context)
-    estimate_system_prompt = _build_estimate_system_prompt(prompt_context)
-    summary_system_prompt = _build_summary_system_prompt(prompt_context)
-    next_steps_system_prompt = _build_next_steps_system_prompt(prompt_context)
+    authority_value = mission.mission_authority
+    estimate_system_prompt = _build_estimate_system_prompt(prompt_context, authority_value)
+    summary_system_prompt = _build_summary_system_prompt(prompt_context, authority_value)
+    next_steps_system_prompt = _build_next_steps_system_prompt(prompt_context, authority_value)
     self_verify_system_prompt = _build_self_verify_system_prompt(prompt_context)
     delta_system_prompt = _build_delta_system_prompt(prompt_context)
     mission_context = _build_mission_context(mission, documents)
@@ -653,7 +734,7 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
     analytic_rank = {"OK": 0, "CAUTION": 1, "REVIEW": 2}
 
     final_status = base_guardrail.get("status", "ok")
-    final_issues = list(base_guardrail.get("issues", []))
+    final_issues: List[Any] = list(base_guardrail.get("issues", []))
     base_rank = status_rank.get(final_status, 1)
 
     if analytic_issues:
@@ -686,6 +767,9 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
     if final_status == "blocked":
         agent_status = "failed"
 
+    if kg_warning_issues:
+        final_issues.extend(kg_warning_issues)
+
     agent_run = models.AgentRun(
         mission_id=mission.id,
         status=agent_status,
@@ -695,13 +779,12 @@ async def run_agent_cycle(mission_id: int, db: Session, profile: str = "humint")
         guardrail_issues=final_issues,
     )
 
-    db.add(agent_run)
-    db.commit()
-    db.refresh(agent_run)
-
-    # attach transient analysis artifacts (not yet stored in DB columns)
     agent_run.raw_facts = facts
     agent_run.gaps = gaps
     agent_run.delta_summary = delta_summary
+
+    db.add(agent_run)
+    db.commit()
+    db.refresh(agent_run)
 
     return agent_run

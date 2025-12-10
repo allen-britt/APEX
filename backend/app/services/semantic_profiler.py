@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict
 
 from app.models import MissionDataset
-from app.services.llm_client import LLMClient, LlmError
+from app.services.llm_client import LLMCallException, LLMRole, call_llm_with_role
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,7 @@ class SemanticProfilerError(Exception):
 
 
 class SemanticProfiler:
-    def __init__(self, *, llm_client: LLMClient | None = None, timeout: float = 20.0) -> None:
-        self._llm = llm_client or LLMClient()
+    def __init__(self, *, timeout: float = 20.0) -> None:
         self._timeout = timeout
 
     def _build_prompt(self, dataset: MissionDataset) -> str:
@@ -36,18 +36,23 @@ class SemanticProfiler:
             "Provide the semantic annotation JSON as specified."
         )
 
-    def generate(self, dataset: MissionDataset) -> Dict[str, Any]:
+    def generate(self, dataset: MissionDataset, *, policy_block: str | None = None) -> Dict[str, Any]:
         if not dataset.profile:
             raise SemanticProfilerError("Dataset has no profile to analyze")
 
-        messages = [
-            {"role": "system", "content": SEMANTIC_ANNOTATOR_SYSTEM_PROMPT},
-            {"role": "user", "content": self._build_prompt(dataset)},
-        ]
+        prompt = self._build_prompt(dataset)
+
+        async def _call() -> str:
+            return await call_llm_with_role(
+                prompt=prompt,
+                system=SEMANTIC_ANNOTATOR_SYSTEM_PROMPT,
+                policy_block=policy_block,
+                role=LLMRole.UTILITY_FAST,
+            )
 
         try:
-            response = self._llm.chat(messages, timeout=self._timeout)
-        except LlmError as exc:
+            response = asyncio.run(_call())
+        except LLMCallException as exc:
             raise SemanticProfilerError("LLM semantic profiling failed") from exc
 
         try:

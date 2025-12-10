@@ -1,20 +1,24 @@
 # backend/app/services/humint_report_service.py
 
-from typing import Dict, Any, List, Optional
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
 from sqlalchemy.orm import Session
+
+from app import models
 from app.humint.templates import HUMINT_TEMPLATES, HumintTemplateDefinition
 from app.db.session import SessionLocal
-
-# Models (these two will be created below)
-from app.models.humint_report import HumintReport
-from app.models.humint_insight import HumintInsight
 from app.models.humint_followup import HumintFollowUpPlan
+from app.models.humint_insight import HumintInsight
+from app.models.humint_report import HumintReport
+from app.services.llm_client import LLMCallException, LLMRole, call_llm_with_role
+from app.services.policy_context import build_policy_prompt
 
-# Placeholder imports for LLM and KG clients
-# Replace with your actual implementations
-class LlmClient:
-    def ask_json(self, prompt: str) -> Dict[str, Any]:
-        raise NotImplementedError("LLM integration not implemented yet")
+logger = logging.getLogger(__name__)
 
 
 class KgClient:
@@ -39,6 +43,18 @@ class EvidenceBundleService:
         raise NotImplementedError
 
 
+_ANTI_FABRICATION_RULES = (
+    "ANTI-FABRICATION CONSTRAINTS:\n"
+    "- Do not invent entities, events, or tradecraft details that are absent from the provided HUMINT report or computed insights.\n"
+    "- If information is unknown, respond with 'Not established in provided reporting'.\n"
+    "- Stay within Title 50 HUMINT authorities; do not recommend arrests, warrants, or kinetic actions."
+)
+
+
+def _with_anti_fabrication(prompt: str) -> str:
+    return f"{prompt}\n\n{_ANTI_FABRICATION_RULES}"
+
+
 class HumintReportService:
     """
     Skeleton service for HUMINT report ingestion and analysis.
@@ -47,7 +63,8 @@ class HumintReportService:
 
     def __init__(self, db: Optional[Session] = None):
         self.db = db or SessionLocal()
-        self.llm = LlmClient()
+        # Optional test override: a stub with ask_json(prompt) -> dict
+        self.llm: Any | None = None
         self.kg = KgClient()
         self.bundle_service = EvidenceBundleService(self.db)
 
@@ -84,7 +101,13 @@ class HumintReportService:
 
         return self._find_template_by_id("HUMINT_IIR_STANDARD")
 
-    def parse_into_sections(self, template: HumintTemplateDefinition, raw_text: str) -> Dict[str, str]:
+    def parse_into_sections(
+        self,
+        template: HumintTemplateDefinition,
+        raw_text: str,
+        *,
+        mission: models.Mission | None = None,
+    ) -> Dict[str, str]:
         """
         Use the LLM to segment the incoming HUMINT report into structured sections.
         The LLM must not invent content; only relocate and trim existing content.
@@ -95,24 +118,29 @@ class HumintReportService:
             for s in template["sections"]
         ]
 
-        prompt = f"""
-You are a HUMINT reporting assistant. Your task is to map this HUMINT report into the template sections below.
+        system_prompt = _with_anti_fabrication(
+            "You are a HUMINT reporting assistant tasked with mapping free-text reports into canonical sections. "
+            "Follow DIA HUMINT reporting standards and stay within Title 50 authorities."
+        )
+        user_prompt = (
+            "TEMPLATE SECTIONS:\n"
+            f"{section_specs}\n\n"
+            "RULES:\n"
+            "- Do NOT invent information.\n"
+            "- Only use text from the original report.\n"
+            "- Trim or group sentences if needed, but never fabricate.\n"
+            "- If a section has no corresponding text, return an empty string.\n"
+            "- Return a JSON object with keys matching the 'id' fields in the template.\n\n"
+            "ORIGINAL REPORT:\n"
+            f"\"\"\"{raw_text}\"\"\"\n"
+        )
 
-TEMPLATE SECTIONS:
-{section_specs}
-
-RULES:
-- Do NOT invent information.
-- Only use text from the original report.
-- Trim or group sentences if needed, but never fabricate.
-- If a section has no corresponding text, return an empty string.
-- Return a JSON object with keys matching the 'id' fields in the template.
-
-ORIGINAL REPORT:
-\"\"\"{raw_text}\"\"\"
-"""
-
-        llm_response = self.llm.ask_json(prompt)
+        llm_response = self._invoke_humint_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            mission=mission,
+            task_name="humint_sections",
+        )
 
         structured: Dict[str, str] = {}
         for s in template["sections"]:
@@ -227,52 +255,56 @@ ORIGINAL REPORT:
                 "deception_risk": i.deception_risk,
             })
 
-        prompt = f"""
-You are a senior HUMINT SME supporting a joint intelligence team (Army, DIA, SOF, IC).
-Your task is to generate a FOLLOW-UP ACTION PLAN based strictly on:
+        mission = self._load_mission(report.mission_id)
+        system_prompt = _with_anti_fabrication(
+            "You are a senior HUMINT SME supporting a joint intelligence team. "
+            "Generate follow-up action plans that stay within Title 50 HUMINT lanes and avoid law-enforcement directives."
+        )
+        user_prompt = (
+            "Your task is to generate a FOLLOW-UP ACTION PLAN based strictly on:\n\n"
+            "1) The structured HUMINT report sections\n"
+            "2) The computed insights (novelty, corroboration, relevance, deception risk)\n\n"
+            "RULES:\n"
+            "- No invented facts.\n"
+            "- Questions must connect directly to insights or explicit gaps.\n"
+            "- Recommendations must be actionable at the next interview or via cross-cueing.\n"
+            "- Do not issue operational orders. Only collection-focused actions.\n"
+            "- Output JSON with this structure:\n\n"
+            "{\n"
+            "  \"objective_summary\": \"2-3 sentences\",\n"
+            "  \"next_interview_questions\": [\n"
+            "    {\n"
+            "      \"questionText\": \"...\",\n"
+            "      \"rationale\": \"...\",\n"
+            "      \"priority\": \"low\" | \"medium\" | \"high\"\n"
+            "    }\n"
+            "  ],\n"
+            "  \"verification_tasks\": [\n"
+            "    {\n"
+            "      \"type\": \"HUMINT\" | \"OSINT\" | \"SIGINT\" | \"IMINT\" | \"DOCEXPLOIT\" | \"OTHER\",\n"
+            "      \"description\": \"...\",\n"
+            "      \"priority\": \"low\" | \"medium\" | \"high\"\n"
+            "    }\n"
+            "  ],\n"
+            "  \"engagement_notes\": [\n"
+            "    {\n"
+            "      \"noteText\": \"...\",\n"
+            "      \"category\": \"rapport\" | \"safety\" | \"cover\" | \"other\"\n"
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "STRUCTURED SECTIONS:\n"
+            f"{structured_sections}\n\n"
+            "INSIGHTS:\n"
+            f"{insights_payload}\n"
+        )
 
-1) The structured HUMINT report sections
-2) The computed insights (novelty, corroboration, relevance, deception risk)
-
-RULES:
-- No invented facts.
-- Questions must connect directly to insights or explicit gaps.
-- Recommendations must be actionable at the next interview or via cross-cueing.
-- Do not issue operational orders. Only collection-focused actions.
-- Output JSON with this structure:
-
-{{
-  "objective_summary": "2-3 sentences",
-  "next_interview_questions": [
-    {{
-      "questionText": "...",
-      "rationale": "...",
-      "priority": "low" | "medium" | "high"
-    }}
-  ],
-  "verification_tasks": [
-    {{
-      "type": "HUMINT" | "OSINT" | "SIGINT" | "IMINT" | "DOCEXPLOIT" | "OTHER",
-      "description": "...",
-      "priority": "low" | "medium" | "high"
-    }}
-  ],
-  "engagement_notes": [
-    {{
-      "noteText": "...",
-      "category": "rapport" | "safety" | "cover" | "other"
-    }}
-  ]
-}}
-
-STRUCTURED SECTIONS:
-{structured_sections}
-
-INSIGHTS:
-{insights_payload}
-"""
-
-        plan_json = self.llm.ask_json(prompt)
+        plan_json = self._invoke_humint_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            mission=mission,
+            task_name="humint_followup",
+        )
 
         plan = HumintFollowUpPlan(
             report_id=report.id,
@@ -300,8 +332,9 @@ INSIGHTS:
         - Return assembled data package
         """
 
+        mission = self._load_mission(mission_id)
         template = self.detect_template(raw_text)
-        structured = self.parse_into_sections(template, raw_text)
+        structured = self.parse_into_sections(template, raw_text, mission=mission)
 
         report = HumintReport(
             template_id=template["id"],
@@ -323,3 +356,49 @@ INSIGHTS:
             "insights": insights,
             "followup_plan": followup,
         }
+
+    def _load_mission(self, mission_id: Optional[int]) -> models.Mission | None:
+        if not mission_id:
+            return None
+        return self.db.query(models.Mission).filter(models.Mission.id == mission_id).first()
+
+    def _build_policy_block(self, mission: models.Mission | None) -> str | None:
+        if not mission:
+            return None
+        history = getattr(mission, "authority_history_lines", None)
+        return build_policy_prompt(mission.mission_authority, mission.int_types or [], authority_history=history)
+
+    def _invoke_humint_llm(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        mission: models.Mission | None,
+        task_name: str,
+    ) -> Dict[str, Any]:
+        override = getattr(self, "llm", None)
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+        if override is not None:
+            return override.ask_json(combined_prompt)
+
+        policy_block = self._build_policy_block(mission)
+
+        async def _call() -> str:
+            return await call_llm_with_role(
+                prompt=user_prompt,
+                system=system_prompt,
+                policy_block=policy_block,
+                role=LLMRole.ANALYSIS_PRIMARY,
+            )
+
+        try:
+            raw_response = asyncio.run(_call())
+        except LLMCallException as exc:
+            logger.exception("HUMINT LLM call failed", extra={"task": task_name})
+            raise RuntimeError("HUMINT LLM call failed") from exc
+
+        try:
+            return json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            logger.exception("HUMINT LLM returned invalid JSON", extra={"task": task_name, "raw": raw_response})
+            raise ValueError("HUMINT LLM returned invalid JSON") from exc

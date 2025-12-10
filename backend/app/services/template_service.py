@@ -168,9 +168,9 @@ Narrative:
 
 ---
 
-## 8. Recommended Next Steps (OSINT / LEO-safe)
+## 8. Recommended Next Steps (OSINT / Authority-safe)
 
-_Frame next steps as intelligence recommendations or referrals (e.g., "Coordinate with appropriate law-enforcement partners through established legal channels to..."). Do **not** direct arrests, traffic stops, weapon seizures, or other enforcement actions._
+_Frame next steps as intelligence recommendations or referrals aligned with {{authority_label}} authorities (e.g., "Coordinate with appropriate partners through established legal channels to..."). Do **not** direct arrests, traffic stops, weapon seizures, or other enforcement actions._
 
 {{recommended_next_steps}}
 """
@@ -215,7 +215,7 @@ FULL_INTREP_MARKDOWN = """# INTELLIGENCE REPORT – {{mission_title}}
 
 ## 5. Courses of Action (High-Level)
 
-_Offer analytic recommendations using coordination/referral phrasing (e.g., "Recommend that host-nation law enforcement consider…"). Avoid direct orders to arrest, seize, or conduct traffic stops._
+ _Offer analytic recommendations using coordination/referral phrasing (e.g., "Recommend that appropriate partner authorities consider…"). Avoid direct orders to arrest, seize, or conduct traffic stops._
 
 {{coas_high_level}}
 

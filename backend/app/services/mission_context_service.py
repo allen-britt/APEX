@@ -97,6 +97,9 @@ class MissionContextService:
             "next_steps": run.next_steps,
             "guardrail_status": run.guardrail_status,
             "guardrail_issues": list(run.guardrail_issues or []),
+            "raw_facts": run.raw_facts,
+            "gaps": run.gaps,
+            "delta_summary": run.delta_summary,
             "created_at": _isoformat_or_none(run.created_at),
             "updated_at": _isoformat_or_none(run.updated_at),
         }

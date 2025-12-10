@@ -75,14 +75,18 @@ AUTHORITY_REGISTRY: Dict[AuthorityType, AuthorityDescriptor] = {
         value=AuthorityType.TITLE_50_IC,
         label="Title 50 – Intelligence",
         description=(
-            "Foreign intelligence and counterintelligence for the IC, with strict rules around U.S. person data."
+            "DIA-led HUMINT and counterintelligence production focused on foreign targets. Missions span OVERT "
+            "(debriefings, interrogations, liaison, source operations) and CLANDESTINE (CLAN) collection, all in support "
+            "of national, combatant command, and OSD priorities."
         ),
         prompt_context=(
-            "You are supporting Title 50 intelligence analysis. Provide assessments, risk narratives, and"
-            " collection insights for foreign targets."
+            "You operate under Title 50 HUMINT authorities. Provide foreign intelligence assessments and collection "
+            "insights grounded in overt or clandestine human reporting—never domestic law-enforcement narratives."
+            " Reinforce operator intent, access, and tradecraft considerations without directing arrests or prosecutions."
         ),
         prohibitions=(
-            "Do NOT suggest domestic arrests or kinetic targeting orders. Treat purely domestic requests as out of scope."
+            "Do NOT recommend domestic arrests, warrant actions, or kinetic targeting orders. Keep outputs within "
+            "intelligence production, liaison, and collection advisories—no criminal charging guidance."
         ),
         guardrail_keywords=(
             "arrest",
@@ -302,7 +306,11 @@ AUTHORITY_REGISTRY: Dict[AuthorityType, AuthorityDescriptor] = {
 }
 
 
-def normalize_authority(value: str | AuthorityType | None) -> AuthorityType:
+def normalize_authority(
+    value: str | AuthorityType | None,
+    *,
+    default: AuthorityType | None = AuthorityType.LEO,
+) -> AuthorityType | None:
     """Resolve arbitrary user-provided value into a supported authority type."""
 
     if isinstance(value, AuthorityType):
@@ -320,11 +328,20 @@ def normalize_authority(value: str | AuthorityType | None) -> AuthorityType:
         }
         if cleaned in legacy_map:
             return legacy_map[cleaned]
-    return AuthorityType.LEO
+    return default
 
 
 def get_descriptor(value: str | AuthorityType | None) -> AuthorityDescriptor:
     authority = normalize_authority(value)
+    if authority is None:
+        raise ValueError("Unknown authority descriptor")
+    return AUTHORITY_REGISTRY[authority]
+
+
+def try_get_descriptor(value: str | AuthorityType | None) -> AuthorityDescriptor | None:
+    authority = normalize_authority(value, default=None)
+    if authority is None:
+        return None
     return AUTHORITY_REGISTRY[authority]
 
 

@@ -15,7 +15,7 @@ from app.humint.constants import DIA_HUMINT_PROFILE
 from app.models.evidence import EvidenceBundle
 from app.services import extraction_service as extraction_module
 from app.services.evidence_extractor_service import EvidenceExtractorService
-from app.services.llm_client import LLMClient, get_active_model
+from app.services.llm_client import LLMCallException, LLMRole, call_llm_with_role, get_active_model
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +39,14 @@ class HumintIirAnalysisService:
         self,
         *,
         db: Session,
-        llm_client: Optional[LLMClient] = None,
         extraction_service: Optional[ExtractionServiceProtocol] = None,
         evidence_extractor: Optional[EvidenceExtractorService] = None,
+        llm_client: Any | None = None,
     ) -> None:
         self.db = db
-        self._llm = llm_client or LLMClient()
         self._extraction_service = extraction_service or extraction_module
         self._evidence_extractor = evidence_extractor or EvidenceExtractorService(session=db)
+        self._llm_override = llm_client
 
     async def analyze_iir(self, mission_id: int, document_id: int) -> schemas.HumintIirAnalysisResult:
         """Run the HUMINT IIR analysis workflow for the supplied mission/document."""
@@ -206,9 +206,22 @@ class HumintIirAnalysisService:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        override = self._llm_override
+        if override is not None:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            raw_response = override.chat(messages)
+            return json.loads(raw_response)
+
         try:
-            raw_response = await asyncio.to_thread(self._llm.chat, messages)
-        except Exception as exc:  # pragma: no cover - network failure
+            raw_response = await call_llm_with_role(
+                prompt=user_prompt,
+                system=system_prompt,
+                role=LLMRole.ANALYSIS_PRIMARY,
+            )
+        except LLMCallException as exc:  # pragma: no cover - network failure
             logger.exception("LLM analysis call failed")
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LLM analysis failed") from exc
         try:

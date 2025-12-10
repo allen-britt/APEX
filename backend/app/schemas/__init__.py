@@ -14,6 +14,11 @@ from app.schemas.humint import (
     HumintIirParsedFields,
     HumintInsight,
 )
+from app.schemas.analysis import (
+    FollowUpQuestion,
+    GenericAnalysisRequest,
+    GenericAnalysisResult,
+)
 
 
 class ORMBase(BaseModel):
@@ -329,9 +334,9 @@ class AgentRunResponse(ORMBase):
     summary: Optional[str] = None
     next_steps: Optional[str] = None
     guardrail_status: str
-    guardrail_issues: List[str] = Field(default_factory=list)
-    raw_facts: Optional[List[dict]] = None
-    gaps: Optional[List[dict]] = None
+    guardrail_issues: List[Any] = Field(default_factory=list)
+    raw_facts: Dict[str, Any] | List[Any] | None = None
+    gaps: Dict[str, Any] | List[Any] | None = None
     delta_summary: Optional[str] = None
     created_at: datetime
     updated_at: datetime

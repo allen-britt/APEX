@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
+from enum import Enum
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, TypedDict, TypeVar
 
 import httpx
+from pydantic_settings import BaseSettings
 
 from app.config_llm import (
     get_active_llm_name,
@@ -37,6 +40,55 @@ class LlmError(Exception):
     """Raised when an LLM request fails."""
 
 
+class LLMRole(str, Enum):
+    ANALYSIS_PRIMARY = "analysis_primary"
+    UTILITY_FAST = "utility_fast"
+    NARRATIVE_POLISH = "narrative_polish"
+
+
+class LLMSettings(BaseSettings):
+    llm_analysis_primary_model: str = "llama3:8b"
+    llm_utility_fast_model: str = "mistral:instruct"
+    llm_narrative_polish_model: str | None = None
+    llm_analysis_primary_temperature: float = 0.2
+    llm_utility_fast_temperature: float = 0.4
+    llm_narrative_polish_temperature: float = 0.3
+
+    class Config:
+        env_prefix = "APEX_"
+
+
+llm_settings = LLMSettings()
+
+
+def get_model_name_for_role(role: LLMRole) -> str:
+    if role == LLMRole.ANALYSIS_PRIMARY:
+        return llm_settings.llm_analysis_primary_model
+    if role == LLMRole.UTILITY_FAST:
+        return llm_settings.llm_utility_fast_model
+    if role == LLMRole.NARRATIVE_POLISH:
+        return llm_settings.llm_narrative_polish_model or llm_settings.llm_analysis_primary_model
+    return llm_settings.llm_analysis_primary_model
+
+
+def get_temperature_for_role(role: LLMRole) -> float:
+    if role == LLMRole.ANALYSIS_PRIMARY:
+        return llm_settings.llm_analysis_primary_temperature
+    if role == LLMRole.UTILITY_FAST:
+        return llm_settings.llm_utility_fast_temperature
+    if role == LLMRole.NARRATIVE_POLISH:
+        return llm_settings.llm_narrative_polish_temperature
+    return llm_settings.llm_analysis_primary_temperature
+
+
+def get_llm_config_summary() -> dict[str, str]:
+    return {
+        "analysis_primary_model": get_model_name_for_role(LLMRole.ANALYSIS_PRIMARY),
+        "utility_fast_model": get_model_name_for_role(LLMRole.UTILITY_FAST),
+        "narrative_polish_model": get_model_name_for_role(LLMRole.NARRATIVE_POLISH),
+    }
+
+
 class LLMClient:
     """Unified client for local LLMs (Ollama or other backends)."""
 
@@ -56,6 +108,8 @@ class LLMClient:
         model_name: str,
         messages: List[ChatMessage],
         timeout: float | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
     ) -> str:
         url = f"{base_url.rstrip('/')}/api/chat"
         payload: Dict[str, Any] = {
@@ -63,6 +117,8 @@ class LLMClient:
             "messages": messages,
             "stream": False,
         }
+        if temperature is not None:
+            payload["options"] = {"temperature": temperature}
 
         request_timeout = timeout or self._timeout
         try:
@@ -80,19 +136,49 @@ class LLMClient:
             logger.exception("Unexpected Ollama response: %s", data)
             raise LlmError("Unexpected Ollama response format") from exc
 
-    def chat(self, messages: List[ChatMessage], *, timeout: float | None = None) -> str:
-        active_name = get_active_llm_name()
-        cfg = get_llm_by_name(active_name)
+    def chat(
+        self,
+        messages: List[ChatMessage],
+        *,
+        timeout: float | None = None,
+        model_name: str | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> str:
+        target_name = model_name or get_active_llm_name()
+        try:
+            cfg = get_llm_by_name(target_name)
+        except ValueError:
+            cfg = None
 
-        if cfg.kind == "ollama_chat":
+        if cfg is not None:
+            resolved_model = getattr(cfg, "model", None) or target_name
+            provider = getattr(cfg, "provider", None)
+
+            if cfg.kind == "ollama_chat" or provider == "ollama":
+                return self._call_ollama_chat(
+                    base_url=cfg.base_url,
+                    model_name=resolved_model,
+                    messages=messages,
+                    timeout=timeout,
+                    temperature=temperature,
+                    **kwargs,
+                )
+
+            raise LlmError(f"Unsupported LLM engine kind: {cfg.kind!r}")
+
+        if ":" in target_name:
+            base_url = get_llm_config().base_url
             return self._call_ollama_chat(
-                base_url=cfg.base_url,
-                model_name=cfg.name,
+                base_url=base_url,
+                model_name=target_name,
                 messages=messages,
                 timeout=timeout,
+                temperature=temperature,
+                **kwargs,
             )
 
-        raise LlmError(f"Unsupported LLM engine kind: {cfg.kind!r}")
+        raise ValueError(f"Unknown LLM model: {target_name!r}")
 
 
 _CHAT_CLIENT = LLMClient()
@@ -342,8 +428,9 @@ def _profile_hint(profile: str) -> str:
 async def _call_llm(
     prompt: str,
     system: str | None = None,
-    *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
+    temperature: float | None = None,
 ) -> str:
     """Invoke the active local LLM via the unified LLMClient."""
 
@@ -353,23 +440,35 @@ async def _call_llm(
         messages.append({"role": "system", "content": combined_system})
     messages.append({"role": "user", "content": prompt})
 
+    model_name = get_model_name_for_role(role)
+    resolved_temperature = temperature if temperature is not None else get_temperature_for_role(role)
     try:
-        return _CHAT_CLIENT.chat(messages)
+        return _CHAT_CLIENT.chat(
+            messages,
+            model_name=model_name,
+            temperature=resolved_temperature,
+        )
     except LlmError as exc:  # pragma: no cover - simple logging path
         logger.exception("LLM chat call failed")
         raise LLMCallException("LLM chat call failed") from exc
 
 
-def _build_entity_prompt(text: str, profile: str) -> str:
-    focus = _profile_hint(profile)
-    return (
-        f"Analysis profile: {profile.upper()} - {focus}\n"
-        "Extract mission-relevant entities aligned with this focus.\n"
-        "Output MUST be a JSON array. Each entity object requires keys: name (string), type (string), description (string).\n"
-        "Be specific with `type` (e.g., PERSON, FACILITY, NETWORK, PLATFORM).\n"
-        "Mission text to analyze:\n"
-        f"{text}\n"
-        "Return ONLY JSON."
+async def call_llm_with_role(
+    *,
+    prompt: str,
+    system: str | None = None,
+    policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
+    temperature: float | None = None,
+) -> str:
+    """Public helper to invoke the configured model for a specific logical role."""
+
+    return await _call_llm(
+        prompt=prompt,
+        system=system,
+        policy_block=policy_block,
+        role=role,
+        temperature=temperature,
     )
 
 
@@ -380,9 +479,10 @@ def _build_event_prompt(text: str, profile: str) -> str:
         "Identify discrete mission events (who/what/when/where).\n"
         "Return a JSON array of objects with keys: title, summary, timestamp (ISO8601 or null), location (string or null), involved_entity_ids (array, leave empty).\n"
         "Infer timestamps and locations when clearly implied (e.g., 'at 0930Z', 'near Bravo checkpoint').\n"
+        "Do not include commentary, markdown, or code fences. If unsure, respond with an empty array [].\n"
         "Mission text to analyze:\n"
         f"{text}\n"
-        "Return ONLY JSON."
+        "Your entire response MUST be a single valid JSON array."
     )
 
 
@@ -398,6 +498,60 @@ def _deepcopy_stub(value: T) -> T:
     return json.loads(json.dumps(value))
 
 
+def _build_entity_prompt(text: str, profile: str) -> str:
+    focus = _profile_hint(profile)
+    return (
+        f"Analysis profile: {profile.upper()} - {focus}\n"
+        "Extract mission entities (people, orgs, assets, locations) with concise descriptors.\n"
+        "Return ONLY a JSON array of objects with keys: name, type, description, roles (array), source_refs (array).\n"
+        "Do not include commentary, markdown, or code fences. If unsure, respond with an empty array [].\n"
+        "Mission text:\n"
+        f"{text}\n"
+        "Your entire response MUST be a single valid JSON array."
+    )
+
+
+def _strip_code_fence(raw: str) -> str:
+    """Extract JSON payload from fenced or prefixed LLM output."""
+
+    if not raw:
+        return ""
+
+    text = raw.strip()
+
+    fence_start = text.find("```")
+    if fence_start != -1:
+        fence_end = text.find("```,", fence_start + 3)
+        if fence_end == -1:
+            fence_end = text.find("```", fence_start + 3)
+        content_start = fence_start + 3
+        content_end = fence_end if fence_end != -1 else None
+        text = text[content_start:content_end].strip()
+
+    lowered = text.lower()
+    if lowered.startswith("json"):
+        text = text[4:].lstrip(" \t\r\n:")
+
+    first_brace = -1
+    for ch in ("{", "["):
+        idx = text.find(ch)
+        if idx != -1:
+            if first_brace == -1 or idx < first_brace:
+                first_brace = idx
+
+    if first_brace > 0:
+        text = text[first_brace:]
+
+    return text.strip()
+
+
+def _normalize_and_parse_json(raw: str) -> Any:
+    """Normalize an LLM response and parse JSON payloads."""
+
+    text = _strip_code_fence(raw)
+    return json.loads(text)
+
+
 async def _with_llm_fallback(
     *,
     prompt: str,
@@ -405,17 +559,100 @@ async def _with_llm_fallback(
     parse: Callable[[str], T],
     stub: Callable[[], T],
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
+    temperature: float | None = None,
 ) -> T:
     if is_demo_mode():
         logger.info("LLM demo mode active, returning stubbed data.")
         return stub()
 
+    raw: str | None = None
+    model_name = get_model_name_for_role(role)
     try:
-        raw = await _call_llm(prompt, system=system, policy_block=policy_block)
+        raw = await _call_llm(
+            prompt=prompt,
+            system=system,
+            policy_block=policy_block,
+            role=role,
+            temperature=temperature,
+        )
         return parse(raw)
-    except Exception:
-        logger.warning("LLM call failed or response invalid; falling back to stub", exc_info=True)
+    except JSONDecodeError as exc:
+        preview = (raw or "")[:500]
+        if not raw or not raw.strip():
+            logger.warning(
+                "LLM returned empty response; falling back to stub (role=%s, model=%s)",
+                role.value,
+                model_name,
+            )
+        else:
+            logger.warning(
+                "LLM JSON parse failed; falling back to stub (role=%s, model=%s, error=%r, raw_preview=%r)",
+                role.value,
+                model_name,
+                exc,
+                preview,
+            )
+        repaired = await _repair_json_with_utility(raw, role=role)
+        if repaired:
+            try:
+                return parse(repaired)
+            except JSONDecodeError as repair_exc:
+                logger.warning(
+                    "JSON repair failed; falling back to stub (role=%s, model=%s, error=%r, repaired_preview=%r)",
+                    role.value,
+                    model_name,
+                    repair_exc,
+                    repaired[:500],
+                )
         return stub()
+    except Exception:
+        logger.warning(
+            "LLM call failed or response invalid; falling back to stub (role=%s, model=%s)",
+            role.value,
+            model_name,
+            exc_info=True,
+        )
+        return stub()
+
+
+async def _repair_json_with_utility(
+    raw: str,
+    *,
+    role: LLMRole,
+) -> str | None:
+    if not raw or not raw.strip():
+        return None
+
+    system_prompt = (
+        "You are a strict JSON repair tool."
+        " You receive model output that SHOULD have been valid JSON but may contain narration, markdown fences, or minor syntax errors."
+        " Respond with ONLY valid JSON that best matches the original intent."
+    )
+    prompt = (
+        "Repair the following output so it becomes valid JSON."
+        " Do not include commentary, explanation, or code fences—just the JSON.\n"
+        "=== ORIGINAL OUTPUT START ===\n"
+        f"{raw}\n"
+        "=== ORIGINAL OUTPUT END ==="
+    )
+
+    try:
+        repaired = await _call_llm(
+            prompt=prompt,
+            system=system_prompt,
+            role=LLMRole.UTILITY_FAST,
+            temperature=0.0,
+        )
+    except LLMCallException:
+        logger.warning(
+            "JSON repair helper failed to call utility LLM (role=%s)",
+            role.value,
+            exc_info=True,
+        )
+        return None
+
+    return repaired.strip()
 
 
 async def extract_entities(
@@ -423,11 +660,12 @@ async def extract_entities(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> List[dict]:
     prompt = _build_entity_prompt(text, profile)
 
     def _parse(raw: str) -> List[dict]:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         if not isinstance(data, list):
             raise ValueError("Entity payload must be a list")
         return data
@@ -438,6 +676,8 @@ async def extract_entities(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_ENTITIES),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )
 
 
@@ -446,11 +686,12 @@ async def extract_events(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> List[dict]:
     prompt = _build_event_prompt(text, profile)
 
     def _parse(raw: str) -> List[dict]:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         if not isinstance(data, list):
             raise ValueError("Event payload must be a list")
         return data
@@ -461,6 +702,8 @@ async def extract_events(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_EVENTS),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )
 
 
@@ -470,6 +713,7 @@ async def summarize_mission(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> str:
     guardrail = (
         "You are an intelligence analyst supporting this mission."
@@ -499,6 +743,7 @@ async def summarize_mission(
         parse=lambda raw: raw,
         stub=_stub,
         policy_block=policy_block,
+        role=role,
     )
 
 
@@ -508,6 +753,7 @@ async def suggest_next_steps(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> str:
     guardrail = (
         "You are an intelligence analyst recommending lawful next steps for this mission."
@@ -542,6 +788,7 @@ async def suggest_next_steps(
         parse=lambda raw: raw,
         stub=_stub,
         policy_block=policy_block,
+        role=role,
     )
 
 
@@ -550,18 +797,20 @@ async def extract_raw_facts(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> List[dict]:
     prompt = (
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
         "Extract atomic mission facts. Each fact must be a single statement without conjunctions.\n"
         "Output MUST be a JSON array of objects with keys: statement (string), confidence (0-1 float), source_refs (array of strings).\n"
+        "Do not include commentary, markdown, or code fences. If unsure, respond with an empty array [].\n"
         "Mission text:\n"
         f"{text}\n"
-        "Return ONLY JSON."
+        "Your entire response MUST be a single valid JSON array."
     )
 
     def _parse(raw: str) -> List[dict]:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         if not isinstance(data, list):
             raise ValueError("Raw facts payload must be a list")
         return data
@@ -572,6 +821,8 @@ async def extract_raw_facts(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_FACTS),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )
 
 
@@ -582,6 +833,7 @@ async def detect_information_gaps(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -592,12 +844,13 @@ async def detect_information_gaps(
     prompt = (
         "Identify missing information that would materially improve this analysis.\n"
         "Return ONLY JSON with the schema: {\"gaps\": [{\"description\": str, \"priority\": \"high|medium|low\", \"recommended_questions\": [str]}]}\n"
+        "Do not include commentary, markdown, or code fences. If no gaps, return {\"gaps\": []}.\n"
         "Context JSON follows:\n"
         f"{_serialize_payload(payload)}"
     )
 
     def _parse(raw: str) -> dict:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         gaps = data.get("gaps") if isinstance(data, dict) else None
         if not isinstance(gaps, list):
             raise ValueError("Information gaps payload missing 'gaps'")
@@ -609,6 +862,8 @@ async def detect_information_gaps(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_GAPS),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )
 
 
@@ -619,6 +874,7 @@ async def generate_operational_estimate(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> str:
     payload = {
         "profile": profile,
@@ -639,6 +895,7 @@ async def generate_operational_estimate(
         parse=lambda raw: raw,
         stub=lambda: DEMO_OPERATIONAL_ESTIMATE,
         policy_block=policy_block,
+        role=role,
     )
 
 
@@ -649,6 +906,7 @@ async def generate_run_delta(
     current_events: List[dict],
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> str:
     payload = {
         "previous_summary": previous_summary,
@@ -668,6 +926,7 @@ async def generate_run_delta(
         parse=lambda raw: raw,
         stub=lambda: DEMO_DELTA_SUMMARY,
         policy_block=policy_block,
+        role=role,
     )
 
 
@@ -678,6 +937,7 @@ async def cross_document_analysis(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -689,15 +949,16 @@ async def cross_document_analysis(
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
         "Identify corroborated findings, contradictions, and notable trends observed across documents.\n"
         "Return ONLY JSON with keys: corroborated_findings (list of strings), contradictions (list of strings), notable_trends (list of strings).\n"
+        "Do not include commentary, markdown, or code fences. Use empty lists when no items exist.\n"
         f"Context JSON:\n{_serialize_payload(payload)}"
     )
 
     def _parse(raw: str) -> dict:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         for key in ("corroborated_findings", "contradictions", "notable_trends"):
             values = data.get(key)
             if not isinstance(values, list):
-                raise ValueError(f"Cross-document payload missing list for {key}")
+                raise ValueError("Cross-document payload missing list fields")
         return data
 
     return await _with_llm_fallback(
@@ -706,6 +967,8 @@ async def cross_document_analysis(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_CROSS_DOCUMENT),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )
 
 
@@ -718,6 +981,7 @@ async def self_verify_assessment(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -731,11 +995,12 @@ async def self_verify_assessment(
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
         "Evaluate the internal consistency of this assessment. Identify obvious contradictions or missing logic.\n"
         "Return ONLY JSON with keys: internal_consistency (good|questionable|poor), confidence_adjustment (float in [-0.5,0.5]), notes (list of strings).\n"
+        "Do not include commentary, markdown, or code fences.\n"
         f"Context JSON:\n{_serialize_payload(payload)}"
     )
 
     def _parse(raw: str) -> dict:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         consistency = data.get("internal_consistency")
         if consistency not in {"good", "questionable", "poor"}:
             raise ValueError("Self-verification payload missing internal_consistency")
@@ -753,6 +1018,8 @@ async def self_verify_assessment(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_SELF_VERIFY),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )
 
 
@@ -764,6 +1031,7 @@ async def guardrail_quality_review(
     profile: str = "humint",
     *,
     policy_block: str | None = None,
+    role: LLMRole = LLMRole.ANALYSIS_PRIMARY,
 ) -> dict:
     payload = {
         "profile": profile,
@@ -776,11 +1044,12 @@ async def guardrail_quality_review(
         f"Analysis profile: {profile.upper()} - {_profile_hint(profile)}\n"
         "Evaluate this assessment for analytic quality, sourcing, and red flags.\n"
         "Return ONLY JSON with keys: status (OK|CAUTION|REVIEW) and issues (list of strings).\n"
+        "Do not include commentary, markdown, or code fences. Use an empty list when there are no issues.\n"
         f"Context JSON:\n{_serialize_payload(payload)}"
     )
 
     def _parse(raw: str) -> dict:
-        data = json.loads(raw)
+        data = _normalize_and_parse_json(raw)
         status = (data.get("status") or "OK").upper()
         if status not in {"OK", "CAUTION", "REVIEW"}:
             raise ValueError("Guardrail review payload missing valid status")
@@ -796,4 +1065,6 @@ async def guardrail_quality_review(
         parse=_parse,
         stub=lambda: _deepcopy_stub(DEMO_GUARDRAIL_REVIEW),
         policy_block=policy_block,
+        role=role,
+        temperature=0.0,
     )

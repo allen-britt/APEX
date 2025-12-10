@@ -9,14 +9,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.config_aggregator import get_aggregator_config
-from app.services.llm_client import LLMClient
+from app.services.llm_client import LLMRole, call_llm_with_role, get_llm_config_summary
 from app.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["status"])
-
-_llm_client = LLMClient()
 
 
 async def _check_aggregator() -> str:
@@ -35,12 +33,14 @@ async def _check_aggregator() -> str:
 
 
 async def _check_llm() -> str:
-    messages = [
-        {"role": "system", "content": "You are a health check for APEX."},
-        {"role": "user", "content": "Say OK."},
-    ]
+    system_prompt = "You are a quick responsiveness probe for Project APEX's LLM stack."
+    user_prompt = "Reply with the single word OK."
     try:
-        _llm_client.chat(messages)
+        await call_llm_with_role(
+            prompt=user_prompt,
+            system=system_prompt,
+            role=LLMRole.UTILITY_FAST,
+        )
         return "ok"
     except Exception:
         logger.exception("LLM health check failed")
@@ -87,18 +87,14 @@ def _warm_database() -> str:
 
 
 async def _run_trivial_analysis() -> str:
-    messages = [
-        {
-            "role": "system",
-            "content": "You are NexusCore's analysis warmup task. Provide a short acknowledgement only.",
-        },
-        {
-            "role": "user",
-            "content": "Confirm the analysis stack has been preloaded by replying with READY.",
-        },
-    ]
+    system_prompt = "You are NexusCore's analysis warmup task. Provide a short acknowledgement only."
+    user_prompt = "Confirm the analysis stack has been preloaded by replying with READY."
     try:
-        _llm_client.chat(messages)
+        await call_llm_with_role(
+            prompt=user_prompt,
+            system=system_prompt,
+            role=LLMRole.UTILITY_FAST,
+        )
         return "ok"
     except Exception:
         logger.exception("Trivial analysis warmup failed")
@@ -150,3 +146,9 @@ async def warmup() -> JSONResponse:
         content={"overall": overall, **components},
         status_code=http_status,
     )
+
+
+@router.get("/status/llm-config")
+async def llm_config_summary() -> JSONResponse:
+    summary = get_llm_config_summary()
+    return JSONResponse(content=summary, status_code=status.HTTP_200_OK)

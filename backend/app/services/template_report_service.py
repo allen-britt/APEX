@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -10,14 +11,16 @@ from typing import Any, Dict, Optional
 from sqlalchemy.orm import Session
 
 from app import models
+from app.authorities import AuthorityType, get_descriptor
 from app.models.decision_dataset import DecisionDataset
 from app.models.evidence import EvidenceBundle
 from app.services.decision_dataset_service import DecisionDatasetService
 from app.services.evidence_extractor_service import EvidenceExtractorService
-from app.services.llm_client import LLMClient, LlmError
+from app.services.llm_client import LLMCallException, LLMRole, call_llm_with_role
 from app.services.kg_snapshot_utils import summarize_kg_snapshot
 from app.services.mission_context_service import MissionContextError, MissionContextService
 from app.services.prompt_builder import build_global_system_prompt
+from app.services.policy_context import build_policy_prompt
 from app.services.template_filter import filter_templates_for_mission
 from app.services.template_service import (
     InternalReportTemplate,
@@ -57,7 +60,6 @@ _REPORT_META_PATTERNS = [
 _CAPITALIZED_TOKEN_PATTERN = re.compile(r"\b([A-Z][A-Za-z]+)\b")
 _DATE_TOKEN_PATTERN = re.compile(r"\b(\d{4}(?:-\d{2}-\d{2})?)\b")
 _BASE_ALLOWED_TERMS = {
-    "leo",
     "mission",
     "authority",
     "int",
@@ -95,6 +97,17 @@ _TEMPLATE_FILL_RULES = (
     "- Keep the provided section order and headings exactly as shown."
 )
 
+_ANTI_FABRICATION_CONSTRAINTS = (
+    "ANTI-FABRICATION CONSTRAINTS:\n"
+    "- Do not invent entities, events, policies, locations, or other facts that are absent from the provided context or datasets.\n"
+    "- If information is unknown or missing, state 'Not established in provided context' instead of speculating.\n"
+    "- Keep all recommendations strictly within the mission authority, INT lanes, and Title 50/HUMINT policy boundaries."
+)
+
+
+def _with_anti_fabrication(prompt: str) -> str:
+    return f"{prompt}\n\n{_ANTI_FABRICATION_CONSTRAINTS}"
+
 
 def _strip_placeholders(text: str) -> str:
     if not text:
@@ -116,6 +129,100 @@ def _sanitize_report_markdown(markdown_text: str | None) -> str:
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _build_authority_role_text(authority_value: str | AuthorityType | None) -> str:
+    descriptor = get_descriptor(authority_value)
+    authority = descriptor.value
+
+    if authority == AuthorityType.TITLE_50_IC:
+        return (
+            "You are an intelligence analyst operating under Title 50 foreign intelligence authorities. "
+            "Focus on HUMINT and all-source analysis, collection guidance, and decision support—never criminal prosecutions. "
+            "Do NOT recommend arrests, domestic warrants, or kinetic actions beyond the mission scope."
+        )
+    if authority == AuthorityType.LEO:
+        return (
+            "You are an intelligence analyst supporting a law-enforcement investigative mission. "
+            "Discuss evidence, leads, and lawful process while keeping recommendations clearly distinct from operational orders."
+        )
+    return (
+        f"You are an intelligence analyst supporting the {descriptor.label} authority lane. "
+        "Keep every recommendation aligned with that lane's legal authorities and coordination pathways."
+    )
+
+
+def _build_empty_case_report(bundle: EvidenceBundle, authority_value: str | AuthorityType | None) -> str:
+    descriptor = get_descriptor(authority_value)
+    mission_name = bundle.mission_name or "Mission"
+    authority_label = descriptor.label
+    lanes = ", ".join(bundle.int_lanes) if bundle.int_lanes else "Not specified"
+    report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    heading = "LEO CASE SUMMARY" if descriptor.value == AuthorityType.LEO else f"{authority_label.upper()} INTELLIGENCE SUMMARY"
+    recommended_heading = "Recommended Actions (LEO)" if descriptor.value == AuthorityType.LEO else "Collection & Coordination Recommendations"
+
+    none_line = "None available based on current evidence."
+
+    sections = [
+        f"# {heading} – {mission_name}",
+        "",
+        f"**Mission:** {mission_name}",
+        f"**Authority:** {authority_label}",
+        f"**INT Lanes:** {lanes}",
+        f"**Prepared by:** EvidenceBundle Guardrail",
+        f"**Date:** {report_date}",
+        "",
+        "---",
+        "",
+        "## 1. Key Judgments",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        "## 2. Incident Overview",
+        "### 2.1 Confirmed Incidents",
+        f"- {none_line}",
+        "",
+        "### 2.2 Patterns",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        "## 3. Subjects & Associates",
+        "### 3.1 Primary Subjects",
+        f"- {none_line}",
+        "",
+        "### 3.2 Associates / Linked Identities",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        "## 4. Modus Operandi",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        "## 5. Evidence & Corroboration",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        "## 6. Gaps & Constraints",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        f"## 7. {recommended_heading}",
+        f"- {none_line}",
+        "",
+        "---",
+        "",
+        "## 8. Risk & Civil Liberties Considerations",
+        f"- {none_line}",
+    ]
+
+    return "\n".join(sections)
 
 
 def _collect_allowed_terms(bundle: EvidenceBundle) -> set[str]:
@@ -234,13 +341,14 @@ class TemplateReportService:
         *,
         template_service: TemplateService | None = None,
         context_service: MissionContextService | None = None,
-        llm_client: LLMClient | None = None,
+        llm_client: None = None,
         decision_service: DecisionDatasetService | None = None,
     ) -> None:
         self.db = db
         self._template_service = template_service or TemplateService()
         self._context_service = context_service or MissionContextService(db)
-        self._llm = llm_client or LLMClient()
+        if llm_client:
+            logger.warning("TemplateReportService ignores custom llm_client; use call_llm_with_role instead.")
         self._decision_service = decision_service or DecisionDatasetService(db, context_service=self._context_service)
 
     def list_templates(self) -> list[InternalReportTemplate]:
@@ -418,6 +526,9 @@ class TemplateReportService:
             "next_steps": run.next_steps,
             "guardrail_status": run.guardrail_status,
             "guardrail_issues": list(run.guardrail_issues or []),
+            "raw_facts": run.raw_facts,
+            "gaps": run.gaps,
+            "delta_summary": run.delta_summary,
             "created_at": run.created_at.isoformat() if run.created_at else None,
             "updated_at": run.updated_at.isoformat() if run.updated_at else None,
         }
@@ -551,6 +662,10 @@ class TemplateReportService:
 
         return dataset
 
+    def _policy_block_for_mission(self, mission: models.Mission) -> str | None:
+        authority_history = getattr(mission, "authority_history_lines", None)
+        return build_policy_prompt(mission.mission_authority, mission.int_types or [], authority_history=authority_history)
+
     def _base_metadata(
         self,
         *,
@@ -622,85 +737,32 @@ class TemplateReportService:
 
         return False
 
-    def _build_empty_leo_report(self, bundle: EvidenceBundle) -> str:
-        mission_name = bundle.mission_name or "Mission"
-        authority = bundle.authority or "LEO"
-        lanes = ", ".join(bundle.int_lanes) if bundle.int_lanes else "Not specified"
-        report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def _invoke_markdown_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        template_id: str,
+        role: LLMRole = LLMRole.NARRATIVE_POLISH,
+        policy_block: str | None = None,
+    ) -> str:
+        async def _call() -> str:
+            logger.info("template_report.llm.invoke", extra={"template_id": template_id, "role": role.value})
+            return await call_llm_with_role(
+                prompt=user_prompt,
+                system=system_prompt,
+                policy_block=policy_block,
+                role=role,
+            )
 
-        none_line = "None available based on current evidence."
-
-        sections = [
-            f"# LEO CASE SUMMARY – {mission_name}",
-            "",
-            f"**Mission:** {mission_name}",
-            f"**Authority:** {authority}",
-            f"**INT Lanes:** {lanes}",
-            f"**Prepared by:** EvidenceBundle Guardrail",
-            f"**Date:** {report_date}",
-            "",
-            "---",
-            "",
-            "## 1. Key Judgments",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 2. Incident Overview",
-            "### 2.1 Confirmed Incidents",
-            f"- {none_line}",
-            "",
-            "### 2.2 Patterns",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 3. Subjects & Associates",
-            "### 3.1 Primary Subjects",
-            f"- {none_line}",
-            "",
-            "### 3.2 Associates / Linked Identities",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 4. Modus Operandi",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 5. Evidence & Corroboration",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 6. Gaps & Constraints",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 7. Recommended Actions (LEO)",
-            f"- {none_line}",
-            "",
-            "---",
-            "",
-            "## 8. Risk & Civil Liberties Considerations",
-            f"- {none_line}",
-        ]
-
-        return "\n".join(sections)
-
-    def _invoke_markdown_llm(self, system_prompt: str, user_prompt: str, *, template_id: str) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
         try:
-            logger.info("template_report.llm.invoke", extra={"template_id": template_id})
-            response = self._llm.chat(messages)
-        except LlmError as exc:
+            response = asyncio.run(_call())
+        except LLMCallException as exc:
             logger.exception("LLM call failed for template_id=%s", template_id)
             raise TemplateGenerationError("LLM call failed", status_code=502) from exc
+        except RuntimeError as exc:
+            logger.exception("template_report.llm.loop_error", extra={"template_id": template_id})
+            raise TemplateGenerationError("LLM loop execution failed", status_code=502) from exc
         return response.strip()
 
     def _generate_leo_case_summary(
@@ -710,9 +772,21 @@ class TemplateReportService:
         template: InternalReportTemplate,
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
+        descriptor = get_descriptor(mission.mission_authority)
+        if descriptor.value != AuthorityType.LEO:
+            raise TemplateGenerationError(
+                "LEO case summary template is restricted to LEO missions",
+                status_code=403,
+            )
+        authority_value = mission.mission_authority
+        role_text = _build_authority_role_text(authority_value)
         bundle = self._get_evidence_bundle(mission.id)
+        policy_block = self._policy_block_for_mission(mission)
+
         if not self._bundle_has_evidence(bundle):
-            markdown_output = _clean_markdown_output(self._build_empty_leo_report(bundle))
+            markdown_output = _clean_markdown_output(
+                _build_empty_case_report(bundle, authority_value)
+            )
         else:
             evidence_payload = {
                 "incidents": [incident.model_dump() for incident in bundle.incidents],
@@ -725,19 +799,19 @@ class TemplateReportService:
             }
             ctx_json = json.dumps(evidence_payload, ensure_ascii=False, indent=2, default=str)
 
-            system_prompt = (
-                "You are a law-enforcement intelligence analyst producing a structured case summary.\n"
+            system_prompt = _with_anti_fabrication(
+                f"{role_text}\n"
                 "Use ONLY the structured evidence bundle provided in JSON.\n"
                 "You are forbidden from inventing incidents, subjects, organizations, locations, or dates.\n"
                 "You must not mention 'mission text', 'provided data', 'initial analysis', 'analysis agent', 'agent advisory', 'publicly available data', or similar phrases.\n"
                 "You must not invent organizations, places, suspects, facilities, or behaviors beyond the evidence bundle.\n"
                 "You must not guess dates or infer entities/relationships not explicitly present.\n"
                 "If a list is empty, write 'None available based on current evidence'.\n"
-                f"Treat the mission authority as '{mission.mission_authority}' only.\n"
+                f"Treat the mission authority as '{descriptor.label}' only.\n"
                 "Never mention variable names or Event IDs.\n"
                 "Do not include instructions like 'Provide HIGH/MEDIUM/LOW'.\n"
                 "If you lack information, respond with 'None available based on current evidence'.\n"
-                "Follow the markdown skeleton exactly and keep a professional LEO tone."
+                f"Follow the markdown skeleton exactly and keep a professional {descriptor.label} tone."
             )
 
             user_prompt = (
@@ -754,7 +828,12 @@ class TemplateReportService:
             )
 
             markdown_output = _clean_markdown_output(
-                self._invoke_markdown_llm(system_prompt, user_prompt, template_id=template.id)
+                self._invoke_markdown_llm(
+                    system_prompt,
+                    user_prompt,
+                    template_id=template.id,
+                    policy_block=policy_block,
+                )
             )
 
         markdown_output = _sanitize_report_markdown(markdown_output)
@@ -809,7 +888,11 @@ class TemplateReportService:
 
         ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2, default=str)
 
-        system_prompt = (
+        role_text = _build_authority_role_text(mission.mission_authority)
+        policy_block = self._policy_block_for_mission(mission)
+
+        system_prompt = _with_anti_fabrication(
+            f"{role_text}\n"
             "You are a staff officer generating a Commander Decision Sheet based on a structured decision dataset. "
             "Use the provided markdown skeleton to present key decision questions, the system-recommended course of action, alternative COAs with pros and cons, "
             "policy/legal checks, blind spots, and overall confidence. Do NOT invent new decisions, policies, or COAs; stay strictly within the provided dataset. "
@@ -826,7 +909,12 @@ class TemplateReportService:
             f"{template.markdown_skeleton}\n"
         )
 
-        markdown_output = self._invoke_markdown_llm(system_prompt, user_prompt, template_id=template.id)
+        markdown_output = self._invoke_markdown_llm(
+            system_prompt,
+            user_prompt,
+            template_id=template.id,
+            policy_block=policy_block,
+        )
         if not markdown_output:
             raise TemplateGenerationError("LLM returned empty output", status_code=502)
         markdown_output = _strip_placeholders(markdown_output)
@@ -861,21 +949,27 @@ class TemplateReportService:
         template: InternalReportTemplate,
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
+        agent_run = context.get("latest_agent_run") or context.get("agent_run")
         ctx = self._build_prompt_context(mission=mission, agent_run=None, context=context)
         ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2, default=str)
 
-        system_prompt = (
-            "You are an open-source intelligence (OSINT) analyst supporting law enforcement. "
-            "Generate an OSINT Pattern of Life report in markdown using the provided skeleton. "
+        descriptor = get_descriptor(mission.mission_authority)
+        role_text = _build_authority_role_text(mission.mission_authority)
+
+        policy_block = self._policy_block_for_mission(mission)
+
+        system_prompt = _with_anti_fabrication(
+            f"{role_text}\n"
+            "You are an open-source intelligence (OSINT) analyst producing a pattern-of-life report tailored to the current authority lane. "
             "Focus on subject identifiers, accounts, platforms, behavior over time, locations, network affiliations, and risk indicators. "
-            "Stay strictly within OSINT and lawful LE procedures. Do NOT recommend illegal surveillance or intelligence-community collection authorities."
+            "Stay strictly within OSINT and lawful procedures for this authority lane. Do NOT recommend illegal surveillance or authorities the mission does not possess."
         )
 
         user_prompt = (
             "CONTEXT (JSON):\n"
             f"{ctx_json}\n\n"
             "TASK:\n"
-            "Fill in the following markdown template for an OSINT Pattern of Life report for law enforcement.\n"
+            f"Fill in the following markdown template for an OSINT Pattern of Life report supporting {descriptor.label}.\n"
             "Replace all {{placeholders}} with concrete content based on the context only.\n"
             "Preserve all headings and section order exactly.\n\n"
             "TEMPLATE:\n"
@@ -887,7 +981,11 @@ class TemplateReportService:
             raise TemplateGenerationError("LLM returned empty output", status_code=502)
         markdown_output = _sanitize_report_markdown(_strip_placeholders(markdown_output))
         html_output = self._render_markdown(markdown_output)
-        metadata = self._base_metadata(template=template, agent_run=agent_run, kg_summary=context.get("kg_snapshot_summary"))
+        metadata = self._base_metadata(
+            template=template,
+            agent_run=agent_run,
+            kg_summary=context.get("kg_snapshot_summary"),
+        )
 
         return {
             "mission_id": mission.id,
@@ -909,7 +1007,12 @@ class TemplateReportService:
         ctx = self._build_prompt_context(mission=mission, agent_run=None, context=context)
         ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2, default=str)
 
-        system_prompt = (
+        role_text = _build_authority_role_text(mission.mission_authority)
+
+        policy_block = self._policy_block_for_mission(mission)
+
+        system_prompt = _with_anti_fabrication(
+            f"{role_text}\n"
             "You are an intelligence analyst preparing a formal intelligence report (INTREP). "
             "Generate a structured report in markdown using the provided skeleton. "
             "Include situation/context, the intelligence picture, assessments and judgments with stated confidence levels, high-level courses of action, gaps, and risks. "
@@ -943,7 +1046,9 @@ class TemplateReportService:
             "metadata": metadata,
         }
 
-    def _get_previous_agent_run(self, mission: models.Mission, current_run: models.AgentRun | None) -> models.AgentRun | None:
+    def _get_previous_agent_run(
+        self, mission: models.Mission, current_run: models.AgentRun | None
+    ) -> models.AgentRun | None:
         query = (
             self.db.query(models.AgentRun)
             .filter(models.AgentRun.mission_id == mission.id)
@@ -965,13 +1070,22 @@ class TemplateReportService:
         ctx = self._build_prompt_context(mission=mission, agent_run=None, context=context)
         ctx["delta_metadata"] = {
             "latest_run_id": getattr(agent_run, "id", None),
-            "latest_run_timestamp": getattr(agent_run, "created_at", None).isoformat() if getattr(agent_run, "created_at", None) else None,
+            "latest_run_timestamp": getattr(agent_run, "created_at", None).isoformat()
+            if getattr(agent_run, "created_at", None)
+            else None,
             "previous_run_id": getattr(previous_run, "id", None),
-            "previous_run_timestamp": getattr(previous_run, "created_at", None).isoformat() if getattr(previous_run, "created_at", None) else None,
+            "previous_run_timestamp": getattr(previous_run, "created_at", None).isoformat()
+            if getattr(previous_run, "created_at", None)
+            else None,
         }
         ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2, default=str)
 
-        system_prompt = (
+        role_text = _build_authority_role_text(mission.mission_authority)
+
+        policy_block = self._policy_block_for_mission(mission)
+
+        system_prompt = _with_anti_fabrication(
+            f"{role_text}\n"
             "You are an intelligence analyst preparing a Delta Update report. "
             "Your job is to describe what has CHANGED since the previous run or report. "
             "Highlight new facts, updated assessments, newly identified gaps, and updated recommended actions. "
